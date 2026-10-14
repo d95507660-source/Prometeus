@@ -1,0 +1,23 @@
+# Веб-сервер
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+
+# yt-dlp НЕ фиксируем на версии: YouTube постоянно меняет защиту,
+# и старый yt-dlp ломается через пару недель. Ставим всегда свежий.
+# [default] — подтягивает yt-dlp-ejs (решатель JS-задачек YouTube, нужен вместе с Deno).
+yt-dlp[default]
+
+# AI-сервисы
+openai==1.54.0
+anthropic==0.39.0
+
+# Утилиты
+python-dotenv==1.0.1
+pydantic==2.9.2
+
+# База данных (пригодится на следующем шаге — фоновый воркер)
+supabase==2.9.1
+
+# Явно фиксируем httpx: openai==1.54.0 ломается на httpx>=0.28
+# (ошибка "unexpected keyword argument 'proxies'").
+httpx==0.27.2

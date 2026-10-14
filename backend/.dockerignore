@@ -1,0 +1,7 @@
+# Не копируем в Docker-образ секреты и мусор
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+.git/
