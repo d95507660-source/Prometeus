@@ -1,0 +1,15 @@
+# Зависимости
+node_modules
+
+# Сборка Next.js
+.next
+out
+
+# Секреты и локальные настройки
+.env
+.env.local
+.env*.local
+
+# Служебное
+*.tsbuildinfo
+.vercel
