@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Arrow Puzzle</title>
+<style>
+  body { margin: 0; background: #14161c; color: #ddd; font-family: sans-serif;
+         display: flex; flex-direction: column; align-items: center; padding-top: 24px; }
+  canvas { background: #1d2029; display: block; }
+  .bar { margin-top: 12px; display: flex; gap: 8px; align-items: center; }
+  button { background: #2c3140; color: #ddd; border: 1px solid #444b5e; padding: 6px 16px;
+           font-size: 15px; cursor: pointer; }
+  #next { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c" width="480" height="480"></canvas>
+<div class="bar">
+  <span id="lvl"></span>
+  <button id="reset">Reset</button>
+  <button id="next">Next</button>
+</div>
+<script>
+const N = 6;
+const CELL = 80;
+const ANIM_MS = 200;
+
+const DIRS = {
+  up:    { dx: 0,  dy: -1, color: '#e85d5d' },
+  down:  { dx: 0,  dy: 1,  color: '#5dc1e8' },
+  left:  { dx: -1, dy: 0,  color: '#e8c35d' },
+  right: { dx: 1,  dy: 0,  color: '#7de85d' },
+};
+
+const LEVELS = [
+  [
+    { x: 1, y: 1, d: 'right' }, { x: 4, y: 1, d: 'down' },
+    { x: 4, y: 4, d: 'left' },  { x: 1, y: 4, d: 'up' },
+    { x: 2, y: 2, d: 'left' },  { x: 3, y: 3, d: 'right' },
+  ],
+  [
+    { x: 0, y: 2, d: 'right' }, { x: 3, y: 2, d: 'up' },
+    { x: 3, y: 0, d: 'left' },  { x: 5, y: 2, d: 'down' },
+    { x: 5, y: 5, d: 'left' },  { x: 2, y: 5, d: 'up' },
+    { x: 2, y: 3, d: 'right' }, { x: 4, y: 4, d: 'up' },
+  ],
+  [
+    { x: 0, y: 0, d: 'right' }, { x: 5, y: 0, d: 'down' },
+    { x: 5, y: 5, d: 'left' },  { x: 0, y: 5, d: 'up' },
+    { x: 2, y: 1, d: 'down' },  { x: 4, y: 2, d: 'left' },
+    { x: 3, y: 4, d: 'up' },    { x: 1, y: 3, d: 'right' },
+    { x: 2, y: 4, d: 'left' },  { x: 3, y: 1, d: 'right' },
+  ],
+];
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const nextBtn = document.getElementById('next');
+const lvlLabel = document.getElementById('lvl');
+
+let levelIndex = 0;
+let arrows = [];
+let anim = null; // { arrow, fromX, fromY, toX, toY, remove, start }
+let won = false;
+
+function loadLevel(i) {
+  levelIndex = i;
+  arrows = LEVELS[i].map(a => ({ x: a.x, y: a.y, d: a.d }));
+  anim = null;
+  won = false;
+  nextBtn.style.display = 'none';
+  lvlLabel.textContent = 'Level ' + (i + 1);
+  draw();
+}
+
+function arrowAt(x, y) {
+  return arrows.find(a => a.x === x && a.y === y);
+}
+
+function inside(x, y) {
+  return x >= 0 && y >= 0 && x < N && y < N;
+}
+
+// Returns null if the move is impossible, otherwise target cell and whether arrow leaves the board.
+function computeMove(a) {
+  const { dx, dy } = DIRS[a.d];
+  let x = a.x, y = a.y;
+  while (true) {
+    const nx = x + dx, ny = y + dy;
+    if (!inside(nx, ny)) {
+      return { x: x + dx * 2, y: y + dy * 2, remove: true };
+    }
+    if (arrowAt(nx, ny)) {
+      if (x === a.x && y === a.y) return null;
+      return { x, y, remove: false };
+    }
+    x = nx; y = ny;
+  }
+}
+
+function drawArrow(px, py, d, alpha) {
+  const { dx, dy, color } = DIRS[d];
+  const cx = px * CELL + CELL / 2;
+  const cy = py * CELL + CELL / 2;
+  const r = CELL * 0.32;
+  // perpendicular
+  const qx = -dy, qy = dx;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(cx + dx * r, cy + dy * r);
+  ctx.lineTo(cx - dx * r + qx * r, cy - dy * r + qy * r);
+  ctx.lineTo(cx - dx * r - qx * r, cy - dy * r - qy * r);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = '#2f3442';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= N; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * CELL + 0.5, 0);
+    ctx.lineTo(i * CELL + 0.5, N * CELL);
+    ctx.moveTo(0, i * CELL + 0.5);
+    ctx.lineTo(N * CELL, i * CELL + 0.5);
+    ctx.stroke();
+  }
+
+  const now = performance.now();
+  for (const a of arrows) {
+    if (anim && anim.arrow === a) {
+      const t = Math.min(1, (now - anim.start) / ANIM_MS);
+      const px = anim.fromX + (anim.toX - anim.fromX) * t;
+      const py = anim.fromY + (anim.toY - anim.fromY) * t;
+      drawArrow(px, py, a.d, anim.remove ? 1 - t : 1);
+    } else {
+      drawArrow(a.x, a.y, a.d, 1);
+    }
+  }
+
+  if (won) {
+    ctx.fillStyle = '#ddd';
+    ctx.font = 'bold 32px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Cleared!', canvas.width / 2, canvas.height / 2);
+  }
+}
+
+function step() {
+  draw();
+  const t = (performance.now() - anim.start) / ANIM_MS;
+  if (t < 1) {
+    requestAnimationFrame(step);
+    return;
+  }
+  const a = anim.arrow;
+  if (anim.remove) {
+    arrows = arrows.filter(o => o !== a);
+  } else {
+    a.x = anim.toX;
+    a.y = anim.toY;
+  }
+  anim = null;
+  if (arrows.length === 0) {
+    won = true;
+    nextBtn.style.display = 'inline-block';
+  }
+  draw();
+}
+
+canvas.addEventListener('click', e => {
+  if (anim || won) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width) / CELL);
+  const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height) / CELL);
+  const a = arrowAt(x, y);
+  if (!a) return;
+  const m = computeMove(a);
+  if (!m) return;
+  anim = {
+    arrow: a,
+    fromX: a.x, fromY: a.y,
+    toX: m.x,
+    toY: m.y,
+    remove: m.remove,
+    start: performance.now(),
+  };
+  requestAnimationFrame(step);
+});
+
+document.getElementById('reset').addEventListener('click', () => loadLevel(levelIndex));
+nextBtn.addEventListener('click', () => loadLevel((levelIndex + 1) % LEVELS.length));
+
+loadLevel(0);
+</script>
+</body>
+</html>
