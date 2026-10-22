@@ -16,7 +16,7 @@ testpaths = ["tests"]
 python_version = "3.11"
 strict = true
 plugins = ["pydantic.mypy"]
-files = ["agent", "pokermath", "examples", "tests/test_agent.py", "tests/test_math.py"]
+files = ["agent", "pokermath", "strategy", "examples", "tests/test_agent.py", "tests/test_math.py", "tests/test_strategy.py"]
 
 [[tool.mypy.overrides]]
 module = ["adapter", "adapter.*"]
