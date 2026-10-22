@@ -11,3 +11,27 @@ dev = ["pytest>=8"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["agent", "examples", "tests/test_agent.py"]
+
+[[tool.mypy.overrides]]
+module = ["adapter", "adapter.*"]
+follow_imports = "silent"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["adapter", "agent"]
+
+[tool.ruff.lint.per-file-ignores]
+# M0 is frozen; these style findings are tracked for a later cleanup.
+"adapter/**" = ["SIM108", "UP042"]
