@@ -3,7 +3,7 @@ name = "poker-sandbox-adapter"
 version = "0.1.0"
 description = "Abstract bot adapter + offline NLHE mock for an isolated poker anti-cheat test bench"
 requires-python = ">=3.11"
-dependencies = ["pydantic>=2.5"]
+dependencies = ["pydantic>=2.5", "numpy>=1.26"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -16,7 +16,7 @@ testpaths = ["tests"]
 python_version = "3.11"
 strict = true
 plugins = ["pydantic.mypy"]
-files = ["agent", "examples", "tests/test_agent.py"]
+files = ["agent", "pokermath", "examples", "tests/test_agent.py", "tests/test_math.py"]
 
 [[tool.mypy.overrides]]
 module = ["adapter", "adapter.*"]
