@@ -1,0 +1,13 @@
+[project]
+name = "poker-sandbox-adapter"
+version = "0.1.0"
+description = "Abstract bot adapter + offline NLHE mock for an isolated poker anti-cheat test bench"
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.5"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
