@@ -1,0 +1,22 @@
+{
+  "name": "exp_demo",
+  "n_hands_per_run": 500,
+  "seeds": [1, 2, 3, 4, 5],
+  "profiles": [
+    {"name": "robot", "config": {"humanlike_level": 0.0}},
+    {"name": "tight", "config": {"vpip_scale": 0.7, "pfr_scale": 0.8, "aggression": 0.4, "bluff_freq": 0.05, "cbet_freq": 0.55}},
+    {"name": "loose", "config": {"vpip_scale": 1.7, "pfr_scale": 1.0, "aggression": 0.35, "bluff_freq": 0.1, "cbet_freq": 0.5}},
+    {"name": "aggressive", "config": {"vpip_scale": 1.25, "pfr_scale": 1.6, "aggression": 0.85, "bluff_freq": 0.25, "cbet_freq": 0.8}},
+    {"name": "humanlike_0.5", "config": {"humanlike_level": 0.5}},
+    {"name": "collusion_group_3", "config": {"collusion": true, "group_size": 3, "coordination_strength": 1.0, "signal_interval": 1}}
+  ],
+  "detectors": [
+    {"name": "fake_low_threshold", "kind": "fake", "version": "fake-m6-0.1", "params": {"threshold": 0.35}},
+    {"name": "fake_high_threshold", "kind": "fake", "version": "fake-m6-0.1", "params": {"threshold": 0.65}}
+  ],
+  "baseline": true,
+  "metrics": ["sync_rate", "yield_rate", "sizing_spearman", "group_bb100", "vpip", "pfr", "af", "wtsd", "timing_cv", "error_share", "adjustments"],
+  "threshold": 0.5,
+  "equity_samples": 200,
+  "notes": "Demo: FakeOracle stubs only (M6). tight/loose/aggressive mirror M3 TIGHT/LOOSE/AGGRESSIVE; collusion uses strength 1, interval 1."
+}
