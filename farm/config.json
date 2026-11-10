@@ -41,6 +41,15 @@
     "stop_on_failure_ratio": 0.2,
     "new_account_days": 14
   },
+  "budget": {
+    "monthly_limit_usd": 300.0,
+    "cost_per_gpu_hour": 0.672,
+    "alert_thresholds": [50, 90, 100],
+    "current_spent_usd": 0.0,
+    "default_scene_gpu_sec": 120,
+    "billing_timezone": "America/Los_Angeles",
+    "state_file": "data/budget.json"
+  },
   "account_health": {
     "enabled": true,
     "new_account_days": 7,

@@ -6,7 +6,7 @@
     if code:
         sys.exit(code)
 
-Отдельно:  python forge_stage.py [--resume] [--device ID ...] [--day YYYY-MM-DD]
+Отдельно:  python forge_stage.py [--resume] [--reset-budget] [--device ID ...] [--day YYYY-MM-DD]
 
 Поведение:
   * обычный запуск — ставит в очередь задачи дня (повторно уже существующие не добавляются),
@@ -15,12 +15,17 @@
   * упавшие задачи повторяются до forge.retry_max_attempts с паузой backoff·2^(n-1);
   * лог прогресса каждые 10 завершений: "10/60 done, 2 failed";
   * доля окончательно упавших > forge.stop_on_failure_ratio → новые задачи не берутся, код 3;
+  * бюджет (budget_guard, если в config.json есть блок budget): перед запуском Cloud Run Job
+    резервируется оценка (сцены × среднее время на сцену × $/час / 3600), после — пишется факт
+    (длительность выполнения из GCP, иначе — время вызова). Лимит месяца исчерпан → задача
+    возвращается в очередь без списания попытки, новые не берутся, код 4. Следующий запуск
+    продолжит в новом месяце биллинга или после --reset-budget;
   * Ctrl+C — новые задачи не берутся, текущие дожидаются (код 130, очередь сохранена);
     второй Ctrl+C — текущие задачи возвращаются в очередь и процесс выходит сразу.
     ВНИМАНИЕ: уже запущенное выполнение Cloud Run при этом продолжает работать в GCP;
     после --resume задача запустится снова (имя прошлого выполнения — в jobs.gcp_execution_name).
 
-Коды выхода: 0 — успех (окончательных падений не больше порога), 3 — порог превышен, 130 — прервано.
+Коды выхода: 0 — успех, 3 — порог падений превышен, 4 — пауза по бюджету, 130 — прервано.
 """
 from __future__ import annotations
 
@@ -42,9 +47,11 @@ log = logging.getLogger(__name__)
 
 EXIT_OK = 0
 EXIT_FAILURE_RATIO = 3
+EXIT_BUDGET_PAUSED = 4
 EXIT_INTERRUPTED = 130
 SUCCESS_STATUSES = ("ok", "skipped")
 NON_RETRIABLE_STATUSES = ("realism_rejected",)  # детерминированы: повтор даст то же самое
+NO_GPU_STATUSES = ("skipped", "realism_rejected")  # Cloud Run Job не запускался — трат нет
 
 
 @dataclass
@@ -53,6 +60,7 @@ class Outcome:
     error: str | None = None
     retriable: bool = True
     gcp_execution_name: str | None = None
+    paused: bool = False  # задача не запускалась (бюджет) — вернуть в очередь без попытки
 
 
 @dataclass
@@ -73,6 +81,7 @@ class RunReport:
     processed: int
     interrupted: bool
     ratio_exceeded: bool
+    budget_paused: bool = False
 
 
 class QueueRunner:
@@ -89,6 +98,7 @@ class QueueRunner:
         self.stop = stop_event or threading.Event()
         self.interrupted = False
         self.ratio_exceeded = False
+        self.budget_paused = False
         self._lock = threading.Lock()
         self._processed = 0
         host = re.sub(r"[^A-Za-z0-9_.-]", "_", socket.gethostname())[:40] or "host"
@@ -121,6 +131,16 @@ class QueueRunner:
             self.ratio_exceeded = True
             self.stop.set()
 
+    def _pause_for_budget(self, job: Job) -> None:
+        self.q.release(job.id)  # pending, попытка не засчитана
+        with self._lock:
+            first = not self.budget_paused
+            self.budget_paused = True
+        if first:
+            log.warning("лимит бюджета исчерпан — новые задачи не запускаю, они остаются в очереди. "
+                        "Продолжение: новый месяц биллинга или --reset-budget")
+        self.stop.set()
+
     # --- исполнитель ---------------------------------------------------------
 
     def _run_one(self, job: Job) -> Outcome:
@@ -149,6 +169,9 @@ class QueueRunner:
                          worker_id.rsplit("-", 1)[-1], job.id, job.device_id, job.day,
                          job.source_idx, job.priority, job.attempts, job.max_attempts)
                 out = self._run_one(job)
+                if out.paused:
+                    self._pause_for_budget(job)
+                    continue
                 recorded = self.q.complete(job.id, "done" if out.ok else "failed", error=out.error,
                                            gcp_execution_name=out.gcp_execution_name,
                                            worker_id=worker_id, retriable=out.retriable)
@@ -221,9 +244,12 @@ class QueueRunner:
         elif self.interrupted:
             code = EXIT_INTERRUPTED
             log.warning("остановлено, очередь сохранена. Продолжить: --resume")
+        elif self.budget_paused:
+            code = EXIT_BUDGET_PAUSED
         else:
             code = EXIT_OK
-        return RunReport(code, st, self._processed, self.interrupted, self.ratio_exceeded)
+        return RunReport(code, st, self._processed, self.interrupted, self.ratio_exceeded,
+                         self.budget_paused)
 
 
 # ---------------------------------------------------------------------------
@@ -237,13 +263,51 @@ def settings_from_config(cfg: Any) -> RunSettings:
                        retry_backoff_sec=float(f.retry_backoff_sec))
 
 
-def make_process(forge: Any, devices_by_id: dict[str, dict]) -> Callable[[Job], Outcome]:
+def max_scenes(cfg: Any) -> int:
+    """Оценка числа сцен сверху: forge выбирает от scenes_per_video[0] до [1], не больше,
+    чем помещается в video_duration_sec. Точное число известно только после сценария (LLM)."""
+    f = cfg.forge
+    by_duration = max(1, max(f.video_duration_sec) // max(1, f.scene_duration_sec))
+    return max(1, min(int(f.scenes_per_video[1]), by_duration))
+
+
+def _video_scenes(res: Any) -> int | None:
+    scenes = getattr(res, "scenes", None) or []
+    n = sum(1 for s in scenes if getattr(s, "role", "scene") != "master")
+    return n or None
+
+
+def make_process(forge: Any, devices_by_id: dict[str, dict], guard: Any = None,
+                 n_scenes_estimate: int = 1) -> Callable[[Job], Outcome]:
     def process(job: Job) -> Outcome:
         device = devices_by_id.get(job.device_id)
         if device is None:
             return Outcome(False, "устройство неактивно или отброшено реестром", retriable=False)
-        res = forge.generate_one(device, job.source_idx, job.day)
+        key = f"job{job.id}.a{job.attempts}"  # повтор — отдельный запуск и отдельная трата
+        if guard is not None:
+            est = guard.estimate_cost(n_scenes_estimate)
+            if not guard.try_reserve(key, est):
+                return Outcome(False, "лимит бюджета", paused=True)
+        t0 = time.monotonic()
+        try:
+            res = forge.generate_one(device, job.source_idx, job.day)
+        except BaseException:
+            if guard is not None:  # не знаем, успел ли запуститься Cloud Run — считаем по времени
+                sec = time.monotonic() - t0
+                guard.record_spend(guard.cost_for_seconds(sec), key)
+            raise
         status = getattr(res, "status", "unknown")
+        if guard is not None:
+            if status in NO_GPU_STATUSES:
+                guard.release(key)
+            else:
+                gpu_sec = getattr(res, "gpu_seconds", None)
+                source = "GCP"
+                if not isinstance(gpu_sec, (int, float)) or gpu_sec <= 0:
+                    gpu_sec, source = time.monotonic() - t0, "время вызова"
+                guard.record_spend(guard.cost_for_seconds(gpu_sec), key, gpu_sec=gpu_sec,
+                                   scenes=_video_scenes(res) or n_scenes_estimate)
+                log.debug("задача %d: %.0f с GPU (%s)", job.id, gpu_sec, source)
         ok = status in SUCCESS_STATUSES
         return Outcome(ok=ok, error=None if ok else (getattr(res, "error", None) or status),
                        retriable=status not in NON_RETRIABLE_STATUSES,
@@ -254,11 +318,20 @@ def make_process(forge: Any, devices_by_id: dict[str, dict]) -> Callable[[Job], 
 def stage_forge(cfg: Any, registry: Any = None, resume: bool = False,
                 device_ids: list[str] | None = None, day: str | None = None,
                 forge: Any = None, settings: RunSettings | None = None,
-                stop_event: threading.Event | None = None) -> int:
-    """Возвращает код выхода (0 / 3 / 130). forge, settings, stop_event — для тестов."""
+                stop_event: threading.Event | None = None, reset_budget: bool = False,
+                guard: Any = None) -> int:
+    """Возвращает код выхода (0 / 3 / 4 / 130). forge, settings, stop_event, guard — для тестов."""
     if registry is None:
         from devices_registry import DevicesRegistry
         registry = DevicesRegistry.from_config(cfg)
+    if guard is None:
+        from budget_guard import guard_for
+        guard = guard_for(cfg)
+    if reset_budget:
+        if guard is None:
+            log.warning("--reset-budget: в config.json нет блока budget — нечего сбрасывать")
+        else:
+            guard.reset("--reset-budget")
     queue = JobQueue(cfg.queue_db_path)
     log.info("очередь: %s", cfg.queue_db_path)
     # все активные — чтобы при --resume доделать задачи и тех устройств, что не в --device
@@ -291,15 +364,27 @@ def stage_forge(cfg: Any, registry: Any = None, resume: bool = False,
         added = queue.enqueue_many(items, max_attempts=cfg.forge.retry_max_attempts)
         log.info("очередь %s: добавлено %d, уже было %d", run_day, added, len(items) - added)
 
+    n_scenes = max_scenes(cfg)
+    if guard is not None:
+        st = guard.status()
+        est = guard.estimate_cost(n_scenes)
+        log.info("бюджет %s: потрачено $%.2f из $%.2f (резерв $%.2f), оценка задачи $%.3f",
+                 st["month"], st["spent_usd"], st["limit_usd"], st["reserved_usd"], est)
+        if not guard.can_spend(est):
+            log.warning("лимит бюджета исчерпан — задачи остаются в очереди. Продолжение: новый "
+                        "месяц биллинга или --reset-budget")
+            return EXIT_BUDGET_PAUSED
+
     if forge is None:
         from forge import Forge
         forge = Forge(cfg, registry)
-    runner = QueueRunner(queue, make_process(forge, devices_by_id),
+    runner = QueueRunner(queue, make_process(forge, devices_by_id, guard, n_scenes),
                          settings or settings_from_config(cfg), day=run_day,
                          scope_days=scope_days, stop_event=stop_event)
     report = runner.run()
     # внешний stop_event (тесты, web_panel) трактуем как Ctrl+C
-    if stop_event is not None and stop_event.is_set() and not report.ratio_exceeded:
+    if (stop_event is not None and stop_event.is_set() and not report.ratio_exceeded
+            and not report.budget_paused):
         report.exit_code = EXIT_INTERRUPTED
         log.warning("остановлено извне, очередь сохранена. Продолжить: --resume")
     return report.exit_code
@@ -313,9 +398,12 @@ def main() -> None:
         ap.add_argument("--day", default=None, help="YYYY-MM-DD (по умолчанию сегодня)")
         ap.add_argument("--resume", action="store_true",
                         help="продолжить незавершённую очередь (без постановки новых задач)")
+        ap.add_argument("--reset-budget", action="store_true",
+                        help="обнулить трату текущего месяца в data/budget.json перед запуском")
 
     cfg, a = cli_config("forge_stage", extra=extra)
-    sys.exit(stage_forge(cfg, resume=a.resume, device_ids=a.device, day=a.day))
+    sys.exit(stage_forge(cfg, resume=a.resume, device_ids=a.device, day=a.day,
+                         reset_budget=a.reset_budget))
 
 
 if __name__ == "__main__":

@@ -138,15 +138,30 @@ class GcpClient:
 
     @staticmethod
     def _execution_status(ex) -> dict | None:
-        """None — ещё выполняется; иначе {'status': SUCCEEDED|FAILED|CANCELLED, ...}."""
+        """None — ещё выполняется; иначе {'status': SUCCEEDED|FAILED|CANCELLED, ...}.
+
+        У Execution нет поля terminal_condition (оно есть у Job): проверка `"terminal_condition"
+        in ex` бросала AttributeError, wait_execution принимал это за сбой сети, ждал до таймаута
+        и отменял даже успешное выполнение. Итог берём из условия "Completed" в ex.conditions
+        [ПРОВЕРИТЬ ПО ДОКАМ: тип условия], а если его нет — по completion_time и счётчикам задач.
+        """
         Cond = run_v2.Condition
-        tc = ex.terminal_condition if "terminal_condition" in ex else None
+        tc = next((c for c in (getattr(ex, "conditions", None) or [])
+                   if getattr(c, "type_", "") == "Completed"), None)
         state = tc.state if tc is not None else None
         done = "completion_time" in ex
         info = {"execution": ex.name,
                 "succeeded": int(getattr(ex, "succeeded_count", 0) or 0),
                 "failed": int(getattr(ex, "failed_count", 0) or 0),
                 "cancelled": int(getattr(ex, "cancelled_count", 0) or 0)}
+        # длительность выполнения для учёта бюджета (budget_guard): completion_time - start_time
+        # [ПРОВЕРИТЬ ПО ДОКАМ: поля Execution в google-cloud-run; при task_count > 1 GPU-время
+        #  больше длительности выполнения]
+        try:
+            if "start_time" in ex and "completion_time" in ex:
+                info["duration_sec"] = max(0.0, (ex.completion_time - ex.start_time).total_seconds())
+        except Exception:
+            pass
         if state == Cond.State.CONDITION_SUCCEEDED:
             return {"status": "SUCCEEDED", **info}
         if state == Cond.State.CONDITION_FAILED:

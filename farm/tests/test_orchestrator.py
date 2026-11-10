@@ -69,7 +69,7 @@ def test_account_health_runs_before_mimic():
 def test_forge_stage_uses_queue_and_reports_stats(tmp_path, monkeypatch):
     o = make_orch(tmp_path)
 
-    def fake_stage(cfg, registry, resume, device_ids, day):
+    def fake_stage(cfg, registry, resume, device_ids, day, reset_budget=False):
         q = JobQueue(cfg.queue_db_path)
         q.enqueue("aria_fight", day, 1)
         q.register_worker("w")
@@ -99,7 +99,7 @@ def test_resume_flag_reaches_forge_stage(tmp_path, monkeypatch):
     o = make_orch(tmp_path)
     seen = {}
 
-    def fake_stage(cfg, registry, resume, device_ids, day):
+    def fake_stage(cfg, registry, resume, device_ids, day, reset_budget=False):
         seen["resume"] = resume
         return 0
 

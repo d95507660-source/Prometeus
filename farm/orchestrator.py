@@ -56,6 +56,7 @@ class Ctx:
     day: str
     registry: Any = None
     resume: bool = False
+    reset_budget: bool = False
 
 
 def _map_devices(ctx: Ctx, fn: Callable[[dict], Any], workers: int) -> dict[str, Any]:
@@ -116,11 +117,13 @@ def stage_mimic(ctx: Ctx):
 
 def stage_forge(ctx: Ctx):
     """forge через очередь SQLite: повторы, приоритет новых аккаунтов, --resume."""
-    from forge_stage import EXIT_FAILURE_RATIO, EXIT_INTERRUPTED as FS_INTERRUPTED, stage_forge
+    from forge_stage import (EXIT_BUDGET_PAUSED, EXIT_FAILURE_RATIO,
+                             EXIT_INTERRUPTED as FS_INTERRUPTED, stage_forge)
     from job_queue import JobQueue
 
     code = stage_forge(ctx.cfg, ctx.registry, resume=ctx.resume,
-                       device_ids=[d["device_id"] for d in ctx.devices], day=ctx.day)
+                       device_ids=[d["device_id"] for d in ctx.devices], day=ctx.day,
+                       reset_budget=ctx.reset_budget)
     queue = JobQueue(ctx.cfg.queue_db_path)
     stats = queue.stats(None if ctx.resume else ctx.day)
     payload = {"exit_code": code, "stats": stats,
@@ -131,6 +134,12 @@ def stage_forge(ctx: Ctx):
         raise StageExit(payload, EXIT_FORGE_FAILURE_RATIO)
     if code == FS_INTERRUPTED:
         raise StageExit(payload, EXIT_INTERRUPTED)
+    if code == EXIT_BUDGET_PAUSED:
+        # цикл не останавливаем (usable=True): ghost/autoposter обработают уже готовые ролики,
+        # pulse проверит устройства; ok=False — итоговый код процесса 1
+        payload["budget_paused"] = True
+        log.warning("forge: пауза по бюджету — дальше идут только уже готовые ролики")
+        return payload, False, True
     return payload, stats["failed"] == 0 and stats["total"] > 0, stats["done"] > 0
 
 
@@ -239,11 +248,11 @@ class Orchestrator:
 
     def run(self, script: str, device_ids: list[str] | None, parallel: bool = False,
             dry_run: bool = False, day: str | None = None,
-            resume: bool = False) -> list[StageResult]:
+            resume: bool = False, reset_budget: bool = False) -> list[StageResult]:
         stages = self.parse_stages(script)
         devices = self.registry.get_active_devices(device_ids=device_ids)
         ctx = Ctx(self.cfg, devices, parallel, day or self.cfg.today(), registry=self.registry,
-                  resume=resume)
+                  resume=resume, reset_budget=reset_budget)
         if dry_run:
             return self._dry_run(stages, ctx)
         if not devices and any(s not in ("trends_collector", "trend_analyzer", "hashtag_updater")
@@ -285,6 +294,8 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--resume", action="store_true",
                     help="forge: доделать незавершённую очередь (после сбоя или Ctrl+C)")
+    ap.add_argument("--reset-budget", action="store_true",
+                    help="forge: обнулить трату месяца в data/budget.json перед запуском")
     a = ap.parse_args()
 
     load_dotenv_if_present(Path(a.config).resolve().parent)
@@ -297,7 +308,7 @@ def main() -> None:
         sys.exit(2)
     with single_instance(cfg.path("logs") / "orchestrator.lock"):
         results = orch.run(a.script, a.device, parallel=a.parallel, dry_run=a.dry_run, day=a.day,
-                           resume=a.resume)
+                           resume=a.resume, reset_budget=a.reset_budget)
     sys.stdout.write(json.dumps(summarize(results), ensure_ascii=False, indent=2, default=str) + "\n")
     sys.exit(exit_code_for(results))
 

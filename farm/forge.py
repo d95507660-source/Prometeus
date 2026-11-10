@@ -141,6 +141,7 @@ class ForgeResult:
     status: str = "unknown"
     error: str | None = None
     gcp_execution_name: str | None = None  # имя выполнения Cloud Run (для очереди и отмены)
+    gpu_seconds: float | None = None       # длительность выполнения Cloud Run (для budget_guard)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -422,6 +423,14 @@ def _llm_script(niche: str, topic: str, api_key: str | None, model: str,
 
 def _stable_int(*parts: Any) -> int:
     return stable_int(*parts)
+
+
+def _float_or_none(v: Any) -> float | None:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f >= 0 else None
 
 
 def _stable_voice_id(device_id: str, pool: list[str]) -> str:
@@ -751,7 +760,9 @@ class Forge:
                           None if out.get("status") == "ok" else json.dumps(out, default=str)[:500],
                           # gcp_client.run_job отдаёт имя в ключе "execution"
                           # [ПРОВЕРИТЬ: пробрасывает ли его run_generation_gcp.generate_for_device]
-                          gcp_execution_name=out.get("execution") or out.get("execution_name"))
+                          gcp_execution_name=out.get("execution") or out.get("execution_name"),
+                          # gcp_client отдаёт duration_sec [ПРОВЕРИТЬ: пробрасывает ли run_generation_gcp]
+                          gpu_seconds=_float_or_none(out.get("duration_sec") or out.get("gpu_seconds")))
         _write_checkpoint(self.cfg, res)
         return res
 

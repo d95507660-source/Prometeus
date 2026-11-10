@@ -71,6 +71,19 @@ class ForgeConfig:
 
 
 @dataclass
+class BudgetConfig:
+    enabled: bool = False                     # нет блока budget в config.json — ограничителя нет
+    monthly_limit_usd: float = 300.0
+    cost_per_gpu_hour: float = 0.672          # $/час инстанса Cloud Run с GPU [ПРОВЕРИТЬ по прайсу:
+                                              # CPU и память тарифицируются отдельно]
+    alert_thresholds: list[int] = field(default_factory=lambda: [50, 90, 100])
+    current_spent_usd: float = 0.0            # стартовая трата месяца, если до включения уже тратили
+    default_scene_gpu_sec: float = 120.0      # оценка до накопления статистики по реальным задачам
+    billing_timezone: str = "America/Los_Angeles"  # месяц биллинга GCP [ПРОВЕРИТЬ ПО ДОКАМ]
+    state_file: str = "data/budget.json"
+
+
+@dataclass
 class AccountHealthConfig:
     enabled: bool = False                     # нет блока в config.json — модуль выключен (как раньше)
     new_account_days: int = 7                 # столько дней новый аккаунт не публикует
@@ -103,6 +116,7 @@ class AppConfig:
     config_path: Path
     timezone: str = "UTC"
     account_health: AccountHealthConfig = field(default_factory=AccountHealthConfig)
+    budget: BudgetConfig = field(default_factory=BudgetConfig)
 
     @property
     def gcp_project_id(self) -> str:
@@ -126,6 +140,11 @@ class AppConfig:
     @property
     def queue_db_path(self) -> Path:
         p = Path(self.forge.queue_db)
+        return p if p.is_absolute() else (self.root / p)
+
+    @property
+    def budget_state_path(self) -> Path:
+        p = Path(self.budget.state_file)
         return p if p.is_absolute() else (self.root / p)
 
 
@@ -223,6 +242,32 @@ def _validate(cfg: AppConfig) -> None:
                     "часть слотов останется без видео или часть видео без слотов",
                     ppd, f.videos_per_device_per_day)
 
+    b = cfg.budget
+
+    def _num(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    if not _num(b.monthly_limit_usd) or b.monthly_limit_usd <= 0:
+        errors.append("budget.monthly_limit_usd должен быть > 0")
+    if not _num(b.cost_per_gpu_hour) or b.cost_per_gpu_hour <= 0:
+        errors.append("budget.cost_per_gpu_hour должен быть > 0")
+    if not _num(b.current_spent_usd) or b.current_spent_usd < 0:
+        errors.append("budget.current_spent_usd должен быть >= 0")
+    if not _num(b.default_scene_gpu_sec) or b.default_scene_gpu_sec <= 0:
+        errors.append("budget.default_scene_gpu_sec должен быть > 0")
+    th = b.alert_thresholds
+    if (not isinstance(th, list) or not th
+            or not all(isinstance(x, int) and not isinstance(x, bool) and 1 <= x <= 100 for x in th)
+            or th != sorted(set(th))):
+        errors.append("budget.alert_thresholds: возрастающий список целых 1..100 без повторов")
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(str(b.billing_timezone))
+    except Exception:
+        errors.append(f"budget.billing_timezone: неизвестный часовой пояс {b.billing_timezone!r}")
+    if not str(b.state_file or "").strip() or "\x00" in str(b.state_file):
+        errors.append("budget.state_file пустой или некорректный")
+
     h = cfg.account_health
     prog = h.max_posts_per_day_progression
     if (not isinstance(prog, list) or not prog
@@ -295,6 +340,13 @@ def load_config(config_path: str | Path = "config.json",
     if unknown_forge:
         log.warning("неизвестные ключи forge в config.json (игнорирую): %s", sorted(unknown_forge))
 
+    budget_raw = dict(raw.get("budget") or {})
+    unknown_budget = set(budget_raw) - set(BudgetConfig.__dataclass_fields__)
+    if unknown_budget:
+        log.warning("неизвестные ключи budget в config.json (игнорирую): %s", sorted(unknown_budget))
+    if "budget" in raw:
+        budget_raw.setdefault("enabled", True)  # блок есть — ограничитель включён
+
     health_raw = raw.get("account_health") or {}
     unknown_health = set(health_raw) - set(AccountHealthConfig.__dataclass_fields__)
     if unknown_health:
@@ -326,6 +378,8 @@ def load_config(config_path: str | Path = "config.json",
         timezone=raw.get("timezone", "UTC"),
         account_health=AccountHealthConfig(**{k: v for k, v in health_raw.items()
                                               if k in AccountHealthConfig.__dataclass_fields__}),
+        budget=BudgetConfig(**{k: v for k, v in budget_raw.items()
+                               if k in BudgetConfig.__dataclass_fields__}),
     )
     _validate(cfg)
     log.debug("config loaded: project=%s niches=%d root=%s", cfg.project, len(niches), root)
