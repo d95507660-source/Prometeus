@@ -6,7 +6,19 @@
     "region": "us-central1",
     "job_name": "prometheus-generate",
     "work_bucket": "prometheus-work",
-    "models_bucket": "prometheus-models"
+    "models_bucket": "prometheus-models",
+    "mode": "cloud"
+  },
+  "local": {
+    "server_url": "http://127.0.0.1:8081",
+    "models_dir": "/models",
+    "vram_safety_mb": 2000,
+    "max_concurrent_jobs": 1,
+    "oom_max_frames": [81, 49],
+    "queue_db": "data/local_queue.db",
+    "output_dir": "data/local_outputs",
+    "poll_interval_sec": 5,
+    "vram_wait_sec": 15
   },
   "mimic": {
     "active_niches": [

@@ -44,6 +44,20 @@ class GcpConfig:
     job_name: str = "prometheus-generate"
     work_bucket: str = "prometheus-work"
     models_bucket: str = "prometheus-models"
+    mode: str = "cloud"                       # cloud — Cloud Run Job; local — local_worker на своём GPU
+
+
+@dataclass
+class LocalConfig:
+    server_url: str = "http://127.0.0.1:8081"
+    models_dir: str = "/models"
+    vram_safety_mb: int = 2000                # свободной видеопамяти перед задачей не меньше этого
+    max_concurrent_jobs: int = 1
+    oom_max_frames: list[int] = field(default_factory=lambda: [81, 49])  # лесенка при нехватке VRAM
+    queue_db: str = "data/local_queue.db"     # очередь local_worker (отдельно от очереди forge)
+    output_dir: str = "data/local_outputs"
+    poll_interval_sec: float = 5.0            # как часто forge спрашивает /status
+    vram_wait_sec: float = 15.0               # пауза, если VRAM не хватает
 
 
 @dataclass
@@ -117,6 +131,7 @@ class AppConfig:
     timezone: str = "UTC"
     account_health: AccountHealthConfig = field(default_factory=AccountHealthConfig)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
+    local: LocalConfig = field(default_factory=LocalConfig)
 
     @property
     def gcp_project_id(self) -> str:
@@ -141,6 +156,18 @@ class AppConfig:
     def queue_db_path(self) -> Path:
         p = Path(self.forge.queue_db)
         return p if p.is_absolute() else (self.root / p)
+
+    def _rel(self, value: str) -> Path:
+        p = Path(value)
+        return p if p.is_absolute() else (self.root / p)
+
+    @property
+    def local_queue_db_path(self) -> Path:
+        return self._rel(self.local.queue_db)
+
+    @property
+    def local_output_dir(self) -> Path:
+        return self._rel(self.local.output_dir)
 
     @property
     def budget_state_path(self) -> Path:
@@ -242,10 +269,41 @@ def _validate(cfg: AppConfig) -> None:
                     "часть слотов останется без видео или часть видео без слотов",
                     ppd, f.videos_per_device_per_day)
 
-    b = cfg.budget
-
     def _num(v: Any) -> bool:
         return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    def _int(v: Any) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool)
+
+    if cfg.gcp.mode not in ("cloud", "local"):
+        errors.append(f"gcp.mode должен быть cloud или local, получено {cfg.gcp.mode!r}")
+    if cfg.gcp.mode == "cloud" and not cfg.gcp.project_id:
+        errors.append("gcp.mode=cloud: нужен gcp.project_id (или GCP_PROJECT_ID)")
+    lc = cfg.local
+    if not re.fullmatch(r"https?://[A-Za-z0-9.\-]{1,253}(:\d{1,5})?/?", str(lc.server_url)):
+        errors.append("local.server_url должен быть вида http://host:port")
+    elif lc.server_url.startswith("http://") and not re.match(
+            r"http://(127\.0\.0\.1|localhost|\[::1\])(:|/|$)", lc.server_url):
+        log.warning("local.server_url без https на внешнем адресе: токен воркера уйдёт открытым текстом")
+    if not str(lc.models_dir or "").strip():
+        errors.append("local.models_dir пустой")
+    if not _int(lc.vram_safety_mb) or lc.vram_safety_mb < 0:
+        errors.append("local.vram_safety_mb должен быть целым >= 0")
+    if not _int(lc.max_concurrent_jobs) or not 1 <= lc.max_concurrent_jobs <= 8:
+        errors.append("local.max_concurrent_jobs должен быть 1..8")
+    ladder = lc.oom_max_frames
+    if (not isinstance(ladder, list) or not ladder
+            or not all(_int(x) and x >= 5 and (x - 1) % 4 == 0 for x in ladder)
+            or ladder != sorted(set(ladder), reverse=True)):
+        errors.append("local.oom_max_frames: убывающий список чисел вида 4k+1 (>= 5), например [81, 49]")
+    for key in ("poll_interval_sec", "vram_wait_sec"):
+        if not _num(getattr(lc, key)) or getattr(lc, key) <= 0:
+            errors.append(f"local.{key} должен быть > 0")
+    for key in ("queue_db", "output_dir"):
+        if not str(getattr(lc, key) or "").strip():
+            errors.append(f"local.{key} пустой")
+
+    b = cfg.budget
 
     if not _num(b.monthly_limit_usd) or b.monthly_limit_usd <= 0:
         errors.append("budget.monthly_limit_usd должен быть > 0")
@@ -332,8 +390,11 @@ def load_config(config_path: str | Path = "config.json",
     setup_logging(log_name or "orchestrator", logs_dir)
 
     gcp_raw = raw.get("gcp") or {}
-    if not gcp_raw.get("project_id") and not os.getenv("GCP_PROJECT_ID"):
-        raise ValueError("в config.json нет gcp.project_id (и не задан GCP_PROJECT_ID)")
+    # project_id обязателен только для облака (проверка в _validate)
+    local_raw = raw.get("local") or {}
+    unknown_local = set(local_raw) - set(LocalConfig.__dataclass_fields__)
+    if unknown_local:
+        log.warning("неизвестные ключи local в config.json (игнорирую): %s", sorted(unknown_local))
 
     forge_raw = raw.get("forge") or {}
     unknown_forge = set(forge_raw) - set(ForgeConfig.__dataclass_fields__)
@@ -361,7 +422,10 @@ def load_config(config_path: str | Path = "config.json",
             job_name=gcp_raw.get("job_name", "prometheus-generate"),
             work_bucket=gcp_raw.get("work_bucket", "prometheus-work"),
             models_bucket=gcp_raw.get("models_bucket", "prometheus-models"),
+            mode=gcp_raw.get("mode", "cloud"),
         ),
+        local=LocalConfig(**{k: v for k, v in local_raw.items()
+                             if k in LocalConfig.__dataclass_fields__}),
         mimic=raw.get("mimic", {}),
         forge=ForgeConfig(**{k: v for k, v in forge_raw.items()
                              if k in ForgeConfig.__dataclass_fields__}),

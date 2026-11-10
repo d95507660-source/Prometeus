@@ -5,6 +5,15 @@
   STAGE: "full" | "wan" | "lipsync"   (для "lipsync" нужен CONCAT_URI)
   python model_server.py [--warm]
 
+Хранилище (env STORAGE_BACKEND, по умолчанию gcs):
+  gcs   — SCENES_URI / OUTPUT_URI / CONCAT_URI вида gs://bucket/key (Cloud Run Job, как раньше);
+  local — обычные пути или file:///… на этой машине, только внутри LOCAL_STORAGE_ROOT
+          (по умолчанию — текущая папка). google-cloud-storage не нужен и не импортируется.
+  In-process (local_worker.py) хранилище не используется вовсе: он вызывает run_pipeline напрямую.
+
+Лимит кадров: payload.max_frames (если задан) важнее WAN_MAX_FRAMES — так local_worker повторяет
+задачу с меньшим числом кадров после нехватки видеопамяти, не трогая глобальные настройки.
+
 Режим сервера:
   MODEL_SERVER_TOKEN=... python model_server.py --serve [--warm]
 
@@ -73,6 +82,7 @@ WAN_OFFLOAD = os.getenv("WAN_OFFLOAD", "1") == "1"
 
 ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 STAGES = ("full", "wan", "lipsync")
+STORAGE_BACKENDS = ("gcs", "local")
 
 DEFAULT_NEGATIVE = ("extra fingers, deformed hands, distorted face, bad anatomy, cartoon, "
                     "text, watermark, blurry, child, minor, teen")
@@ -127,6 +137,75 @@ def gcs_upload(local: Path, uri: str) -> str:
 def gcs_exists(uri: str) -> bool:
     bucket, key = _parse_gs(uri)
     return _gcs().bucket(bucket).blob(key).exists()
+
+
+# ---------------------------------------------------------------------------
+# Хранилище: gcs | local (env STORAGE_BACKEND)
+# ---------------------------------------------------------------------------
+
+def storage_backend() -> str:
+    b = os.getenv("STORAGE_BACKEND", "gcs").strip().lower()
+    if b not in STORAGE_BACKENDS:
+        raise ValueError(f"STORAGE_BACKEND должен быть gcs или local, получено {b!r}")
+    return b
+
+
+def _local_root() -> Path:
+    return Path(os.getenv("LOCAL_STORAGE_ROOT") or os.getcwd()).resolve()
+
+
+def local_path(uri: str) -> Path:
+    """Путь или file:///… → абсолютный путь внутри LOCAL_STORAGE_ROOT (защита от ../ и чужих папок)."""
+    if not isinstance(uri, str) or not uri or "\x00" in uri:
+        raise ValueError(f"некорректный путь: {uri!r}")
+    raw = uri[len("file://"):] if uri.startswith("file://") else uri
+    if "://" in raw:
+        raise ValueError(f"STORAGE_BACKEND=local: ожидался путь, получено {uri!r}")
+    root = _local_root()
+    p = Path(raw)
+    p = (p if p.is_absolute() else root / p).resolve()
+    if p != root and root not in p.parents:
+        raise ValueError(f"путь {p} вне LOCAL_STORAGE_ROOT={root}")
+    return p
+
+
+def check_uri(uri: str) -> None:
+    if storage_backend() == "gcs":
+        _parse_gs(uri)
+    else:
+        local_path(uri)
+
+
+def storage_download(uri: str, local: Path) -> Path:
+    if storage_backend() == "gcs":
+        return gcs_download(uri, local)
+    src = local_path(uri)
+    local.parent.mkdir(parents=True, exist_ok=True)
+    if src.resolve() != local.resolve():
+        shutil.copyfile(src, local)
+    log.info("local: %s -> %s", src, local)
+    return local
+
+
+def storage_upload(local: Path, uri: str) -> str:
+    if storage_backend() == "gcs":
+        return gcs_upload(local, uri)
+    dst = local_path(uri)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(f".{dst.name}.tmp")
+    try:
+        shutil.copyfile(local, tmp)
+        os.replace(tmp, dst)  # читатель не увидит недописанный файл
+    finally:
+        tmp.unlink(missing_ok=True)
+    log.info("local: %s -> %s", local, dst)
+    return str(dst)
+
+
+def storage_exists(uri: str) -> bool:
+    if storage_backend() == "gcs":
+        return gcs_exists(uri)
+    return local_path(uri).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -266,11 +345,21 @@ def _duration(path: Path) -> float:
 # Генерация
 # ---------------------------------------------------------------------------
 
-def _frames_for(duration_sec: float) -> int:
+def _frames_for(duration_sec: float, max_frames: int | None = None) -> int:
     n = int(round(duration_sec * WAN_FPS))
     n = ((max(5, n) - 1 + 2) // 4) * 4 + 1  # Wan требует num_frames = 4k + 1 (ближайшее)
-    max_ok = ((WAN_MAX_FRAMES - 1) // 4) * 4 + 1
+    limit = max(5, int(max_frames)) if max_frames else WAN_MAX_FRAMES
+    max_ok = ((limit - 1) // 4) * 4 + 1
     return min(n, max_ok)
+
+
+def _payload_max_frames(payload: dict) -> int | None:
+    v = payload.get("max_frames")
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int) or not 5 <= v <= 1000:
+        raise ValueError(f"max_frames должен быть целым 5..1000, получено {v!r}")
+    return v
 
 
 def _to_uint8_frames(frames) -> list:
@@ -316,13 +405,14 @@ def gen_master_image(prompt: str, negative: str, out_path: Path, seed: int) -> P
 
 
 def gen_scene_video(prompt: str, negative: str, ref_image: Path | None,
-                    duration_sec: float, out_path: Path, seed: int) -> Path:
+                    duration_sec: float, out_path: Path, seed: int,
+                    max_frames: int | None = None) -> Path:
     import torch
     t2v, i2v = _load_wan()
     g = torch.Generator(device="cpu").manual_seed(seed)
     kwargs: dict[str, Any] = {"prompt": prompt, "negative_prompt": negative,
                               "height": WAN_HEIGHT, "width": WAN_WIDTH,
-                              "num_frames": _frames_for(duration_sec),
+                              "num_frames": _frames_for(duration_sec, max_frames),
                               "num_inference_steps": WAN_STEPS, "guidance_scale": WAN_GUIDANCE,
                               "generator": g, "output_type": "np"}
     if i2v is not None and ref_image and ref_image.exists():
@@ -463,6 +553,7 @@ def stage_wan(tmp: Path, payload: dict, device_id: str, source_idx: int,
     scenes: list[dict] = payload["scenes"]
     negative = payload.get("negative_prompt") or DEFAULT_NEGATIVE
     seed = _seed_from(payload, device_id, source_idx)
+    max_frames = _payload_max_frames(payload)
 
     master_scenes = [s for s in scenes if s.get("role") == "master"]
     video_scenes = [s for s in scenes if s.get("role") != "master"]
@@ -487,7 +578,7 @@ def stage_wan(tmp: Path, payload: dict, device_id: str, source_idx: int,
     for i, sc in enumerate(video_scenes):
         clip = tmp / f"clip_{i:02d}.mp4"
         gen_scene_video(sc["prompt"], negative, master_img,
-                        float(sc.get("duration_sec") or 5), clip, seed + i)
+                        float(sc.get("duration_sec") or 5), clip, seed + i, max_frames=max_frames)
         clips.append(clip)
     return concat_clips(clips, tmp / "concat.mp4")
 
@@ -529,22 +620,49 @@ def run_pipeline(payload: dict, device_id: str, source_idx: int, voice_id: str,
                              _seed_from(payload, device_id, source_idx))
 
 
-def _gcs_master_io(payload: dict):
+def _storage_master_io(payload: dict):
+    """Кэш опорного кадра по master_ref_uri в текущем хранилище (gcs или local)."""
     uri = payload.get("master_ref_uri")
     if not uri:
         return None, None
+    check_uri(uri)
 
     def fetch(local: Path) -> bool:
         try:
-            if gcs_exists(uri):
-                gcs_download(uri, local)
+            if storage_exists(uri):
+                storage_download(uri, local)
                 return True
         except Exception as e:
-            log.warning("опорный кадр не скачан (%s): %s", uri, e)
+            log.warning("опорный кадр не получен (%s): %s", uri, e)
         return False
 
     def store(local: Path) -> None:
-        gcs_upload(local, uri)
+        storage_upload(local, uri)
+
+    return fetch, store
+
+
+_gcs_master_io = _storage_master_io  # старое имя — для совместимости
+
+
+def masters_dir_io(masters: Path, device_id: str, persona_lock: int | None):
+    """Кэш опорного кадра в папке (serve и local_worker): <device>.png или <device>_<lock>.png."""
+    if not ID_RE.fullmatch(device_id or ""):
+        raise ValueError(f"некорректный device_id: {device_id!r}")
+    name = f"{device_id}_{int(persona_lock)}.png" if persona_lock is not None else f"{device_id}.png"
+
+    def fetch(local: Path) -> bool:
+        src = masters / name
+        if src.exists():
+            shutil.copyfile(src, local)
+            return True
+        return False
+
+    def store(local: Path) -> None:
+        masters.mkdir(parents=True, exist_ok=True)
+        tmp = masters / f".{name}.tmp"
+        shutil.copyfile(local, tmp)
+        os.replace(tmp, masters / name)
 
     return fetch, store
 
@@ -557,43 +675,46 @@ def run_job() -> dict:
         source_idx = int(os.environ.get("SOURCE_IDX", "1"))
     except ValueError as e:
         raise ValueError("SOURCE_IDX должен быть целым числом") from e
+    backend = storage_backend()
     scenes_uri = os.environ.get("SCENES_URI", "")
     output_uri = os.environ.get("OUTPUT_URI", "")
-    _parse_gs(scenes_uri)
-    _parse_gs(output_uri)
+    check_uri(scenes_uri)
+    check_uri(output_uri)
     stage = os.environ.get("STAGE", "full")
     if stage not in STAGES:
         raise ValueError(f"STAGE должен быть одним из {STAGES}, получено {stage!r}")
 
     with tempfile.TemporaryDirectory(prefix="job_") as tmp_s:
         tmp = Path(tmp_s)
-        payload = json.loads(gcs_download(scenes_uri, tmp / "scenes.json").read_text(encoding="utf-8"))
+        payload = json.loads(storage_download(scenes_uri, tmp / "scenes.json").read_text(encoding="utf-8"))
         voice_id = os.environ.get("VOICE_ID") or payload.get("voice_id") or "voice_01"
         use_split = os.environ.get("SPLIT_SCREEN", "1" if payload.get("split_screen") else "0") == "1"
-        fetch, store = _gcs_master_io(payload)
-        log.info("задача %s/source_%d stage=%s сцен=%d голос=%s split=%s",
-                 device_id, source_idx, stage, len(payload.get("scenes", [])), voice_id, use_split)
+        fetch, store = _storage_master_io(payload)
+        log.info("задача %s/source_%d stage=%s хранилище=%s сцен=%d голос=%s split=%s",
+                 device_id, source_idx, stage, backend, len(payload.get("scenes", [])),
+                 voice_id, use_split)
 
         concat_uri = os.environ.get("CONCAT_URI") or output_uri.rsplit("/", 1)[0] + "/concat.mp4"
+        check_uri(concat_uri)
         if stage == "wan":
             with _gpu_lock:
                 concat = stage_wan(tmp, payload, device_id, source_idx, fetch, store)
-            gcs_upload(concat, concat_uri)
+            storage_upload(concat, concat_uri)
             return {"stage": "wan", "output_uri": concat_uri}
 
         if stage == "lipsync":
-            concat = gcs_download(concat_uri, tmp / "concat.mp4")
+            concat = storage_download(concat_uri, tmp / "concat.mp4")
             with _gpu_lock:
                 final = stage_lipsync(tmp, concat, payload, voice_id, use_split,
                                       _seed_from(payload, device_id, source_idx))
-            gcs_upload(final, output_uri)
+            storage_upload(final, output_uri)
             return {"stage": "lipsync", "output_uri": output_uri}
 
         final = run_pipeline(payload, device_id, source_idx, voice_id, use_split, tmp, fetch, store)
-        gcs_upload(final, output_uri)
+        storage_upload(final, output_uri)
         return {"stage": "full", "device_id": device_id, "source_idx": source_idx,
                 "output_uri": output_uri, "scenes": len(payload["scenes"]),
-                "split_screen": use_split, "voice_id": voice_id}
+                "split_screen": use_split, "voice_id": voice_id, "storage": backend}
 
 
 # ---------------------------------------------------------------------------
@@ -650,23 +771,8 @@ def serve(do_warm: bool = False) -> None:
         tmp = Path(tempfile.mkdtemp(prefix="srv_"))
         background.add_task(shutil.rmtree, tmp, True)
         payload = p.model_dump()
-        masters = MODELS_DIR / "masters"
         # явный persona_lock → отдельный файл кэша, иначе старый кадр перекроет новое лицо
-        master_name = (f"{p.device_id}_{p.persona_lock}.png" if p.persona_lock is not None
-                       else f"{p.device_id}.png")
-
-        def fetch(local: Path) -> bool:
-            src = masters / master_name
-            if src.exists():
-                shutil.copyfile(src, local)
-                return True
-            return False
-
-        def store(local: Path) -> None:
-            masters.mkdir(parents=True, exist_ok=True)
-            tmp_master = masters / f".{master_name}.tmp"
-            shutil.copyfile(local, tmp_master)
-            os.replace(tmp_master, masters / master_name)
+        fetch, store = masters_dir_io(MODELS_DIR / "masters", p.device_id, p.persona_lock)
 
         try:
             final = run_pipeline(payload, p.device_id, 1, p.voice_id, p.split_screen, tmp,

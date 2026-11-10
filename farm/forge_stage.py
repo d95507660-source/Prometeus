@@ -324,9 +324,12 @@ def stage_forge(cfg: Any, registry: Any = None, resume: bool = False,
     if registry is None:
         from devices_registry import DevicesRegistry
         registry = DevicesRegistry.from_config(cfg)
-    if guard is None:
+    local_gpu = getattr(getattr(cfg, "gcp", None), "mode", "cloud") == "local"
+    if guard is None and not local_gpu:
         from budget_guard import guard_for
         guard = guard_for(cfg)
+    elif guard is None and getattr(getattr(cfg, "budget", None), "enabled", False):
+        log.info("gcp.mode=local: облачный бюджет не применяется (генерация на своём GPU)")
     if reset_budget:
         if guard is None:
             log.warning("--reset-budget: в config.json нет блока budget — нечего сбрасывать")

@@ -694,6 +694,18 @@ class Forge:
         sc = score_hook(plan_hook)
         return script, HookResult(plan_hook, sc, hook.attempts, sc >= self.cfg.forge.hook_score_threshold)
 
+    def _generator(self) -> tuple[Any, dict]:
+        """Где генерировать: gcp.mode=cloud — Cloud Run Job, local — local_worker на своём GPU.
+        Импорт здесь: dry-run работает без GCP и без воркера."""
+        mode = getattr(getattr(self.cfg, "gcp", None), "mode", "cloud")
+        if mode == "local":
+            from run_generation_local import generate_for_device
+            lc = self.cfg.local
+            return generate_for_device, {"server_url": lc.server_url,
+                                         "poll_interval_sec": float(lc.poll_interval_sec)}
+        from run_generation_gcp import generate_for_device
+        return generate_for_device, {}
+
     def plan_script(self, device: dict, source_idx: int, day: str) -> tuple[dict, HookResult, list[Scene]]:
         """Сценарий + сцены без генерации (используется generate_one и --dry-run)."""
         device_id = validate_device_id(device["device_id"])
@@ -706,7 +718,7 @@ class Forge:
         return script, hook, _build_scenes(self.cfg, device, script, rnd)
 
     def generate_one(self, device: dict, source_idx: int, day: str | None = None) -> ForgeResult:
-        from run_generation_gcp import generate_for_device  # импорт здесь: dry-run работает без GCP
+        generate_for_device, backend_kwargs = self._generator()
 
         device_id = validate_device_id(device["device_id"])
         day = validate_day(day or self.cfg.today())
@@ -746,7 +758,7 @@ class Forge:
                 timeout_sec=self.cfg.forge.job_timeout_sec,
                 day=day, narration=hook.hook,
                 seed=_stable_int(device_id, day, source_idx, "seed"),
-                negative_prompt=NEGATIVE_PROMPT, out_path=out_path,
+                negative_prompt=NEGATIVE_PROMPT, out_path=out_path, **backend_kwargs,
             )
         except Exception as e:
             log.error("generate_for_device %s: %s", device_id, e)
