@@ -53,6 +53,17 @@
     "stop_on_failure_ratio": 0.2,
     "new_account_days": 14
   },
+  "economics": {
+    "cpa_commission": 0.0,
+    "new_account_cost": 40,
+    "accounts_per_month_cap": 8,
+    "gpu_cloud_threshold_usd": 300,
+    "forecast_months": 3,
+    "forecast_history_months": 6,
+    "cpa_stats": "data/cpa_stats.json",
+    "software_sales": "data/software_sales.json",
+    "expenses": "data/expenses.json"
+  },
   "budget": {
     "monthly_limit_usd": 300.0,
     "cost_per_gpu_hour": 0.672,

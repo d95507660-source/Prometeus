@@ -85,6 +85,19 @@ class ForgeConfig:
 
 
 @dataclass
+class EconomicsConfig:
+    cpa_commission: float = 0.0           # доля комиссии CPA-сети (0.1 = 10 %), если выплаты — до комиссии
+    new_account_cost: float = 40.0        # во что обходится запуск одного аккаунта, $
+    accounts_per_month_cap: int = 8       # не больше стольких новых аккаунтов в месяц
+    gpu_cloud_threshold_usd: float = 300.0  # облачный GPU дороже этого в месяц — предупреждение
+    forecast_months: int = 3
+    forecast_history_months: int = 6      # сколько прошлых месяцев берётся для прогноза
+    cpa_stats: str = "data/cpa_stats.json"
+    software_sales: str = "data/software_sales.json"
+    expenses: str = "data/expenses.json"
+
+
+@dataclass
 class BudgetConfig:
     enabled: bool = False                     # нет блока budget в config.json — ограничителя нет
     monthly_limit_usd: float = 300.0
@@ -132,6 +145,7 @@ class AppConfig:
     account_health: AccountHealthConfig = field(default_factory=AccountHealthConfig)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     local: LocalConfig = field(default_factory=LocalConfig)
+    economics: EconomicsConfig = field(default_factory=EconomicsConfig)
 
     @property
     def gcp_project_id(self) -> str:
@@ -279,6 +293,23 @@ def _validate(cfg: AppConfig) -> None:
         errors.append(f"gcp.mode должен быть cloud или local, получено {cfg.gcp.mode!r}")
     if cfg.gcp.mode == "cloud" and not cfg.gcp.project_id:
         errors.append("gcp.mode=cloud: нужен gcp.project_id (или GCP_PROJECT_ID)")
+    e = cfg.economics
+    if not _num(e.cpa_commission) or not 0 <= e.cpa_commission < 1:
+        errors.append("economics.cpa_commission должен быть в [0, 1)")
+    if not _num(e.new_account_cost) or e.new_account_cost <= 0:
+        errors.append("economics.new_account_cost должен быть > 0")
+    if not _int(e.accounts_per_month_cap) or e.accounts_per_month_cap < 0:
+        errors.append("economics.accounts_per_month_cap должен быть целым >= 0")
+    if not _num(e.gpu_cloud_threshold_usd) or e.gpu_cloud_threshold_usd < 0:
+        errors.append("economics.gpu_cloud_threshold_usd должен быть >= 0")
+    if not _int(e.forecast_months) or not 1 <= e.forecast_months <= 24:
+        errors.append("economics.forecast_months должен быть 1..24")
+    if not _int(e.forecast_history_months) or not 1 <= e.forecast_history_months <= 36:
+        errors.append("economics.forecast_history_months должен быть 1..36")
+    for key in ("cpa_stats", "software_sales", "expenses"):
+        if not str(getattr(e, key) or "").strip():
+            errors.append(f"economics.{key} пустой")
+
     lc = cfg.local
     if not re.fullmatch(r"https?://[A-Za-z0-9.\-]{1,253}(:\d{1,5})?/?", str(lc.server_url)):
         errors.append("local.server_url должен быть вида http://host:port")
@@ -391,6 +422,10 @@ def load_config(config_path: str | Path = "config.json",
 
     gcp_raw = raw.get("gcp") or {}
     # project_id обязателен только для облака (проверка в _validate)
+    econ_raw = raw.get("economics") or {}
+    unknown_econ = set(econ_raw) - set(EconomicsConfig.__dataclass_fields__)
+    if unknown_econ:
+        log.warning("неизвестные ключи economics в config.json (игнорирую): %s", sorted(unknown_econ))
     local_raw = raw.get("local") or {}
     unknown_local = set(local_raw) - set(LocalConfig.__dataclass_fields__)
     if unknown_local:
@@ -424,6 +459,8 @@ def load_config(config_path: str | Path = "config.json",
             models_bucket=gcp_raw.get("models_bucket", "prometheus-models"),
             mode=gcp_raw.get("mode", "cloud"),
         ),
+        economics=EconomicsConfig(**{k: v for k, v in econ_raw.items()
+                                     if k in EconomicsConfig.__dataclass_fields__}),
         local=LocalConfig(**{k: v for k, v in local_raw.items()
                              if k in LocalConfig.__dataclass_fields__}),
         mimic=raw.get("mimic", {}),
