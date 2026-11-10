@@ -363,7 +363,9 @@ def load_history(analytics_dir: Path, before: str) -> dict[str, Decimal]:
 
 
 def accounts_from_registry(devices: Iterable[dict]) -> list[str]:
-    return sorted(f"{d['device_id']}_{p}" for d in devices
+    """Те же id, что link_rotator ставит в utm_campaign (account_id_for)."""
+    from link_rotator import account_id_for
+    return sorted(account_id_for(d["device_id"], p) for d in devices
                   for p, a in (d.get("accounts") or {}).items() if a.get("enabled", True))
 
 

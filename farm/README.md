@@ -4,7 +4,7 @@
 публикация на телефонах → учёт аккаунтов, бюджета и экономики. Оркестрация — Python на ноутбуке,
 генерация — Cloud Run Job с GPU L4 или (с 8–9 месяца) свой RTX 4090 через `local_worker`.
 
-Статус: тесты на моках зелёные (pytest 288, jest 39), с реальными API площадок, Cloud Run и GPU
+Статус: тесты на моках зелёные (pytest 314, jest 39), с реальными API площадок, Cloud Run и GPU
 код этого репозитория **не запускался** — см. «Что проверено, а что нет» в конце.
 
 ---
@@ -56,7 +56,7 @@ flowchart LR
 | `account_health.py` | Статусы аккаунтов, прогрессия постов, проверка охвата (shadowban) и бана через официальные API |
 | `budget_guard.py` | Месячный лимит расходов на Cloud Run GPU |
 | `revenue_tracker.py`, `analytics-dashboard.js` | P&L по месяцам до цента, прогноз, реинвест-план, HTML-панель |
-| `cpa_matcher.py`, `link_rotator.py` | Подбор CPA-оффера к идее, UTM-ссылки на аккаунт |
+| `cpa_matcher.py`, `link_rotator.py`, `advertising.py` | Подбор CPA-оффера, UTM-ссылки с erid, маркировка рекламы в плане и при публикации |
 | `audience_analyzer.py`, `claude_analyst.py`, `claude_builder.py` | Комментарии → темы и вопросы (Claude) → однофайловые утилиты (с проверкой кода, без запуска) |
 | `fan-memory.js`, `emotional-memory.js`, `chat-integration.js`, `affiliate-tracker.js`, `cross-promo.js` | JS-часть: память фанатов, Fanvue/Anlora, партнёрские ссылки, кросс-промо |
 
@@ -163,6 +163,31 @@ python orchestrator.py --dry-run                         # 5. план цикл�
 
 ---
 
+## Реклама: CPA-ссылки и маркировка
+
+Включается блоком `advertising` в config.json (по умолчанию в примере — включено).
+
+1. **Кому.** Только устройствам с `"account_type": "entertainment"` в devices.json (список —
+   `advertising.account_types`). Без поля `account_type` CPA не ставится.
+2. **Офферы** — `data/cpa_offers.json` (пример: `cpa_offers.example.json`): `keywords`, `payout`, `url`,
+   для маркировки — `advertiser` (наименование и ИНН рекламодателя), `erid` (токен ОРД).
+3. **mimic** подбирает оффер по хуку и хэштегам слота (`cpa_matcher`), строит ссылку на каждую
+   площадку (`link_rotator`, с `utm_*` и `erid`) и пишет в слот `ad` и `description`:
+   «Реклама. <рекламодатель>. erid: <токен>» + ссылка. Новые поля появятся в уже существующих
+   планах только после `python mimic.py --replan`.
+4. **autoposter** для рекламного слота (или если в описании есть CPA-ссылка) ставит метку первой
+   строкой, ссылку, хэштеги площадки (`#ad #sponsored` у TikTok) и нажимает переключатель
+   площадки (Paid partnership у Instagram, Includes paid promotion у YouTube) перед публикацией.
+   Не публикует, если: `require_erid=true` и erid нет; переключатель не найден
+   (`require_platform_toggle=true`); метка не влезает в лимит подписи.
+5. В `posted.json` у опубликованного рекламного поста сохраняется `ad` (оффер, erid, метка) —
+   пригодится для отчётности перед ОРД.
+
+[ПРОВЕРИТЬ] Тексты переключателей в приложениях (`default_ad_markers` без «#») зависят от версии
+и языка интерфейса; erid по закону выдаётся на креатив, а не на оффер; состав метки и отчётность в ОРД —
+по 38-ФЗ и требованиям вашего ОРД. Ссылки в подписях TikTok/Instagram обычно не кликабельны —
+обычно ссылку дают в профиле (тогда маркировка нужна и там).
+
 ## Troubleshooting
 
 | # | Симптом | Причина | Что делать |
@@ -231,7 +256,7 @@ python orchestrator.py --dry-run                         # 5. план цикл�
 ## Тесты и CI
 
 ```bash
-make test     # pytest (288) + jest (39)
+make test     # pytest (314) + jest (39)
 make lint     # ruff + mypy + node --check
 ```
 
@@ -250,6 +275,7 @@ CI (`.github/workflows/ci.yml`): Python 3.10 — ruff, mypy, pytest (с ffmpeg �
 | `tests/test_budget_guard.py` | Лимит, резервы, смена месяца, пауза очереди, статус Cloud Run на настоящих protobuf |
 | `tests/test_local_worker.py` | Воркер: VRAM, OOM-лесенка, мягкая остановка, API, локальное хранилище, переключение режимов |
 | `tests/test_pnl.py` | P&L до цента против ручного расчёта, прогноз, реинвест, панель через Node |
+| `tests/test_advertising.py` | CPA в плане, маркировка «Реклама»/erid/хэштеги, переключатель площадки, запрет публикации без erid |
 | `tests/test_edge_cases.py` | Граничные случаи (атомарная запись при сбое, реестр, `run_job` без статуса, ссылки) |
 | `tests/js/*.test.js` | common, fan-memory, emotional-memory, affiliate-tracker, cross-promo, chat-integration, analytics-dashboard |
 
@@ -270,4 +296,4 @@ CI (`.github/workflows/ci.yml`): Python 3.10 — ruff, mypy, pytest (с ffmpeg �
   тексты кнопок приложений в autoposter, селекторы UI в audience_analyzer.
 - **Правила площадок:** публикация и сбор через автоматизацию интерфейса телефона могут нарушать
   условия площадок; надёжнее официальные API. Пометка AI-контента включена (`monetization.disclosure`);
-  рекламные посты с CPA-ссылками требуют отдельной пометки рекламы — в подписи её пока нет.
+  рекламные посты маркируются автоматически (раздел «Реклама»), но проверку требований закона и ОРД это не заменяет.

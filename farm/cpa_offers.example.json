@@ -1,0 +1,20 @@
+{
+  "offers": [
+    {
+      "id": 1,
+      "name": "FitApp Premium",
+      "brand": "FitApp",
+      "advertiser": "ООО «Пример», ИНН 0000000000",
+      "erid": "2VtzqvEXAMPLE",
+      "keywords": [
+        "fitness",
+        "workout",
+        "squats",
+        "gym"
+      ],
+      "payout": 2.5,
+      "url": "https://partner.example/fitapp?ref=REPLACE_ME",
+      "enabled": true
+    }
+  ]
+}

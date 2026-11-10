@@ -18,7 +18,8 @@ log = logging.getLogger(__name__)
 
 ID_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 PLATFORM_RE = re.compile(r"^[a-z0-9_]{1,20}$")
-UTM_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_content")
+UTM_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "erid")
+ERID_RE = re.compile(r"^[A-Za-z0-9_\-]{4,64}$")
 MAX_URL_LEN = 2048
 
 
@@ -44,7 +45,22 @@ def _check_base_url(base_url: object) -> str:
     return base_url
 
 
-def get_tracking_link(base_url: str, account_id: str, offer_id: int, platform: str) -> str:
+def account_id_for(device_id: str, platform: str) -> str:
+    """account_id для ссылок и P&L: <device_id>_<platform>, символы вне [A-Za-z0-9_] → «_»."""
+    acc = re.sub(r"[^A-Za-z0-9_]", "_", f"{device_id}_{platform}")
+    return _check_id(acc, "account_id")
+
+
+def check_erid(erid: object) -> str:
+    if not isinstance(erid, str) or not ERID_RE.fullmatch(erid):
+        raise ValueError(f"erid: только буквы, цифры, _ и - (4–64 символа): {erid!r}")
+    return erid
+
+
+def get_tracking_link(base_url: str, account_id: str, offer_id: int, platform: str,
+                      erid: str | None = None) -> str:
+    """erid (токен ОРД) добавляется параметром ?erid= — так его требуют передавать в ссылке
+    на рекламируемый объект [ПРОВЕРИТЬ у своего ОРД]."""
     url = _check_base_url(base_url)
     acc = _check_id(account_id, "account_id")
     oid = _check_id(offer_id, "offer_id")
@@ -57,5 +73,7 @@ def get_tracking_link(base_url: str, account_id: str, offer_id: int, platform: s
     query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k not in UTM_KEYS]
     query += [("utm_source", platform), ("utm_medium", "video"),
               ("utm_campaign", f"account_{acc}"), ("utm_content", f"offer_{oid}")]
+    if erid is not None:
+        query.append(("erid", check_erid(erid)))
     return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", urlencode(query),
                        parts.fragment))

@@ -53,6 +53,19 @@
     "stop_on_failure_ratio": 0.2,
     "new_account_days": 14
   },
+  "advertising": {
+    "enabled": true,
+    "require_erid": false,
+    "default_ad_markers": {
+      "tiktok": ["#ad", "#sponsored"],
+      "instagram": ["Paid partnership"],
+      "youtube": ["Includes paid promotion"]
+    },
+    "require_platform_toggle": true,
+    "label_prefix": "Реклама",
+    "offers_file": "data/cpa_offers.json",
+    "account_types": ["entertainment"]
+  },
   "economics": {
     "cpa_commission": 0.0,
     "new_account_cost": 40,

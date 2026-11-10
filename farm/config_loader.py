@@ -84,6 +84,24 @@ class ForgeConfig:
     new_account_days: int = 14                # аккаунты моложе — приоритет 10 (прогрев), иначе 5
 
 
+def _default_ad_markers() -> dict[str, list[str]]:
+    return {"tiktok": ["#ad", "#sponsored"], "instagram": ["Paid partnership"],
+            "youtube": ["Includes paid promotion"]}
+
+
+@dataclass
+class AdvertisingConfig:
+    enabled: bool = False                 # нет блока advertising — CPA в постах не подставляется
+    require_erid: bool = False            # True — рекламный пост без erid не публикуется
+    # Маркер с «#» добавляется в подпись; без «#» — это переключатель в интерфейсе приложения
+    # (Paid partnership / Includes paid promotion), autoposter нажимает его перед публикацией.
+    default_ad_markers: dict[str, list[str]] = field(default_factory=_default_ad_markers)
+    require_platform_toggle: bool = True  # переключатель не найден — пост не публикуется
+    label_prefix: str = "Реклама"
+    offers_file: str = "data/cpa_offers.json"
+    account_types: list[str] = field(default_factory=lambda: ["entertainment"])  # кому ставить CPA
+
+
 @dataclass
 class EconomicsConfig:
     cpa_commission: float = 0.0           # доля комиссии CPA-сети (0.1 = 10 %), если выплаты — до комиссии
@@ -146,6 +164,7 @@ class AppConfig:
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     local: LocalConfig = field(default_factory=LocalConfig)
     economics: EconomicsConfig = field(default_factory=EconomicsConfig)
+    advertising: AdvertisingConfig = field(default_factory=AdvertisingConfig)
 
     @property
     def gcp_project_id(self) -> str:
@@ -174,6 +193,10 @@ class AppConfig:
     def _rel(self, value: str) -> Path:
         p = Path(value)
         return p if p.is_absolute() else (self.root / p)
+
+    @property
+    def ad_offers_path(self) -> Path:
+        return self._rel(self.advertising.offers_file)
 
     @property
     def local_queue_db_path(self) -> Path:
@@ -293,6 +316,25 @@ def _validate(cfg: AppConfig) -> None:
         errors.append(f"gcp.mode должен быть cloud или local, получено {cfg.gcp.mode!r}")
     if cfg.gcp.mode == "cloud" and not cfg.gcp.project_id:
         errors.append("gcp.mode=cloud: нужен gcp.project_id (или GCP_PROJECT_ID)")
+    ad = cfg.advertising
+    if not isinstance(ad.default_ad_markers, dict) or not all(
+            isinstance(k, str) and isinstance(v, list) and all(isinstance(m, str) and m.strip() for m in v)
+            for k, v in ad.default_ad_markers.items()):
+        errors.append("advertising.default_ad_markers: {площадка: [строки]}")
+    elif ad.enabled:
+        missing = [p for p in cfg.uniqueness.get("platforms", []) if not ad.default_ad_markers.get(p)]
+        if missing:
+            errors.append(f"advertising.default_ad_markers: нет маркеров для площадок {missing}")
+    if not str(ad.label_prefix or "").strip() or "\n" in str(ad.label_prefix):
+        errors.append("advertising.label_prefix пустой или многострочный")
+    if not str(ad.offers_file or "").strip():
+        errors.append("advertising.offers_file пустой")
+    if not isinstance(ad.account_types, list) or not all(isinstance(t, str) for t in ad.account_types):
+        errors.append("advertising.account_types: список строк")
+    for flag in ("enabled", "require_erid", "require_platform_toggle"):
+        if not isinstance(getattr(ad, flag), bool):
+            errors.append(f"advertising.{flag} должен быть true/false")
+
     e = cfg.economics
     if not _num(e.cpa_commission) or not 0 <= e.cpa_commission < 1:
         errors.append("economics.cpa_commission должен быть в [0, 1)")
@@ -422,6 +464,10 @@ def load_config(config_path: str | Path = "config.json",
 
     gcp_raw = raw.get("gcp") or {}
     # project_id обязателен только для облака (проверка в _validate)
+    ad_raw = dict(raw.get("advertising") or {})
+    unknown_ad = set(ad_raw) - set(AdvertisingConfig.__dataclass_fields__)
+    if unknown_ad:
+        log.warning("неизвестные ключи advertising в config.json (игнорирую): %s", sorted(unknown_ad))
     econ_raw = raw.get("economics") or {}
     unknown_econ = set(econ_raw) - set(EconomicsConfig.__dataclass_fields__)
     if unknown_econ:
@@ -459,6 +505,8 @@ def load_config(config_path: str | Path = "config.json",
             models_bucket=gcp_raw.get("models_bucket", "prometheus-models"),
             mode=gcp_raw.get("mode", "cloud"),
         ),
+        advertising=AdvertisingConfig(**{k: v for k, v in ad_raw.items()
+                                         if k in AdvertisingConfig.__dataclass_fields__}),
         economics=EconomicsConfig(**{k: v for k, v in econ_raw.items()
                                      if k in EconomicsConfig.__dataclass_fields__}),
         local=LocalConfig(**{k: v for k, v in local_raw.items()

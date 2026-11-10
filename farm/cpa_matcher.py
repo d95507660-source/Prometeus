@@ -123,18 +123,23 @@ def find_offer(content_idea: dict, offers_file: str | Path = DEFAULT_OFFERS_FILE
     if not isinstance(content_idea, dict):
         log.error("find_offer: content_idea должен быть dict, получено %s", type(content_idea).__name__)
         return None
-    candidates = []
-    for offer in load_offers(offers_file):
-        matched = match_keywords(content_idea, offer["keywords"])
-        if matched:
-            candidates.append({**offer, "matched_keywords": matched})
-    # максимальный payout → больше совпадений → меньший id (числовые id раньше строковых)
-    best_offer = min(candidates, key=lambda o: (
-        -float(o["payout"]), -len(o["matched_keywords"]),
-        (0, o["id"], "") if isinstance(o["id"], int) else (1, 0, o["id"])), default=None)
+    best_offer = best_offer_from(content_idea, load_offers(offers_file))
     if best_offer is None:
         log.info("оффер не найден для идеи %r", _idea_text(content_idea)[:120])
     else:
         log.info("оффер %s (payout %.2f) по словам %s", best_offer["id"], best_offer["payout"],
                  best_offer["matched_keywords"])
     return best_offer
+
+
+def best_offer_from(content_idea: dict, offers: list[dict]) -> dict | None:
+    """Как find_offer, но по уже загруженным офферам (без чтения файла и без логов)."""
+    candidates = []
+    for offer in offers:
+        matched = match_keywords(content_idea, offer["keywords"])
+        if matched:
+            candidates.append({**offer, "matched_keywords": matched})
+    # максимальный payout → больше совпадений → меньший id (числовые id раньше строковых)
+    return min(candidates, key=lambda o: (
+        -float(o["payout"]), -len(o["matched_keywords"]),
+        (0, o["id"], "") if isinstance(o["id"], int) else (1, 0, o["id"])), default=None)

@@ -8,6 +8,12 @@
   4. успех засчитывается, только если кнопка публикации нажата и экран публикации закрылся.
 Повторно один и тот же ролик на ту же платформу не публикуется (posted.json рядом с роликом).
 
+Реклама (advertising.py): если в слоте плана есть CPA-оффер (slot.ad) или в description есть
+CPA-ссылка — в подпись первой строкой идёт «Реклама. <рекламодатель>. erid: …», ссылка и хэштеги
+площадки (#ad #sponsored); перед кнопкой публикации нажимается переключатель рекламной метки
+(Paid partnership / Includes paid promotion). Нет erid при require_erid, не нашёлся
+переключатель (require_platform_toggle) или метка не влезает — пост не публикуется.
+
 Допуск к публикации (account_health, если включён в config.json):
   публикуем только аккаунты со статусом active без shadowban_suspect; число постов на площадку
   за день — не больше max_posts_per_day_progression для текущего дня после активации.
@@ -74,27 +80,58 @@ class PostError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 def build_caption_text(description: str, hashtags: list[str], cfg: dict, platform: str,
-                       cta: str = "") -> str:
+                       cta: str = "", *, ad_label: str | None = None, ad_link: str | None = None,
+                       ad_tags: list[str] | tuple[str, ...] = ()) -> str:
+    """Подпись к посту. Обязательные части — метка рекламы (первой строкой), CPA-ссылка, рекламные
+    хэштеги площадки и пометка AI — не обрезаются никогда. Не влезает в лимит: сначала короче хук,
+    потом без CTA, потом без обычных хэштегов; если и так не влезает — PostError (не публикуем)."""
     disc = cfg.get("monetization", {}).get("disclosure", {})
     disclosure = ""
     if disc.get("enabled") and platform in disc.get("platforms", []):
         disclosure = disc.get("text", "AI-generated character")
+    ad_tags = list(dict.fromkeys(t.strip() for t in ad_tags if t.strip()))
     tags = [t if t.startswith("#") else f"#{t}" for t in (hashtags or []) if t]
-    tags = list(dict.fromkeys(tags))
+    tags = [t for t in dict.fromkeys(tags) if t.lower() not in {a.lower() for a in ad_tags}]
     limit = CAPTION_LIMITS.get(platform, 2200)
+    description = (description or "").strip()
 
-    if platform == "youtube":  # у YouTube это заголовок: одна строка, до 100 символов
-        tail = f" | {disclosure}" if disclosure else ""
-        head = " ".join(x for x in [description.strip(), *tags[:2]] if x)
-        head = head[: max(0, limit - len(tail))].rstrip()
-        return (head + tail).strip()
+    if platform == "youtube":  # у YouTube это заголовок: одна строка, до 100 символов, ссылки не работают
+        prefix = f"{ad_label} | " if ad_label else ""
+        suffix = (" " + " ".join(ad_tags) if ad_tags else "") + (f" | {disclosure}" if disclosure else "")
+        if len(prefix) + len(suffix) > limit:
+            raise PostError(f"метка рекламы не помещается в заголовок YouTube ({limit} симв.)")
+        head = " ".join(x for x in [description, *tags[:2]] if x)
+        head = head[: max(0, limit - len(prefix) - len(suffix))].rstrip()
+        return (prefix + head + suffix).strip()
 
-    parts = [description.strip(), cta.strip(), " ".join(tags), disclosure]
-    text = "\n\n".join(p for p in parts if p)
-    if len(text) > limit:  # дисклеймер не обрезаем никогда
-        keep = limit - len(disclosure) - 2
-        text = text[:keep].rstrip() + ("\n\n" + disclosure if disclosure else "")
+    def assemble(desc: str, with_cta: bool, with_tags: bool) -> str:
+        tag_line = " ".join((tags if with_tags else []) + ad_tags)
+        parts = [ad_label or "", desc, ad_link or "", cta.strip() if with_cta else "", tag_line, disclosure]
+        return "\n\n".join(p for p in parts if p)
+
+    for with_cta, with_tags in ((True, True), (False, True), (False, False)):
+        text = assemble(description, with_cta, with_tags)
+        if len(text) <= limit:
+            return text
+        overflow = len(text) - limit
+        if len(description) > overflow:  # укорачиваем хук ровно на перебор
+            return assemble(description[: len(description) - overflow].rstrip(), with_cta, with_tags)[:limit]
+    text = assemble("", False, False)
+    if len(text) > limit:
+        raise PostError(f"обязательная маркировка длиннее лимита подписи {limit} симв.")
     return text
+
+
+def ad_flow(steps: list[dict], toggles: list[str], required: bool, timeout: float = 10.0) -> list[dict]:
+    """Поток публикации с переключателем рекламной метки площадки (Paid partnership и т.п.)
+    перед финальной кнопкой. required — не нашли переключатель → публикация не состоится."""
+    if not toggles:
+        return list(steps)
+    step = {"click_any": list(toggles), "timeout": timeout, "optional": not required, "ad_toggle": True}
+    out = list(steps)
+    idx = next((i for i, s in enumerate(out) if "post_any" in s), len(out))
+    out.insert(idx, step)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +325,8 @@ def post_device(device: dict, cfg_app, day: str | None = None, dry_run: bool = F
                 health: Any = None) -> dict:
     """cfg_app — AppConfig из config_loader. health — AccountHealth (по умолчанию из конфига)."""
     from account_health import health_for
+    from advertising import AdError, detect_ad, hashtag_markers, toggle_markers, validate_for_publish
+    from config_loader import AdvertisingConfig
     from forge import read_checkpoint
     from mimic import get_slot
 
@@ -324,6 +363,10 @@ def post_device(device: dict, cfg_app, day: str | None = None, dry_run: bool = F
     max_per_platform = int(ap_cfg.get("max_posts_per_platform_per_run",
                                       cfg.get("mimic", {}).get("posts_per_account_per_day", 2)))
     screenshots = cfg_app.path("logs") / "autoposter_screens"
+    # маркировка рекламы действует всегда, даже если подбор CPA (advertising.enabled) выключен:
+    # рекламный слот из старого плана всё равно должен выйти с меткой
+    ad_cfg = getattr(cfg_app, "advertising", None) or AdvertisingConfig()
+    ad_errors: list[dict] = []
 
     serial = None
     if not dry_run:
@@ -361,20 +404,47 @@ def post_device(device: dict, cfg_app, day: str | None = None, dry_run: bool = F
             video = source_dir / f"{platform}.mp4"
             if not video.exists():
                 continue
-            caption = build_caption_text(description, hashtags, cfg, platform, cta)
+            ad = detect_ad(slot, platform)
+            ad_info: dict | None = None
+            platform_flows = flows
+            try:
+                if ad is None:
+                    caption = build_caption_text(description, hashtags, cfg, platform, cta)
+                else:
+                    label, link = validate_for_publish(ad, ad_cfg, platform)
+                    if platform == "youtube" and link:
+                        log.info("%s/youtube: ссылка в заголовок не помещается — только метка", device_id)
+                    caption = build_caption_text(description, hashtags, cfg, platform, cta, ad_label=label,
+                                                 ad_link=link, ad_tags=hashtag_markers(ad_cfg, platform))
+                    steps = flows.get(platform) or DEFAULT_FLOWS[platform]
+                    platform_flows = {**flows, platform: ad_flow(steps, toggle_markers(ad_cfg, platform),
+                                                                 ad_cfg.require_platform_toggle)}
+                    ad_info = {"offer_id": ad.get("offer_id"), "erid": ad.get("erid"), "label": label}
+            except (AdError, PostError, ValueError) as e:
+                log.error("публикация %s/%s/%s → %s не состоится: %s", device_id, day, source_dir.name,
+                          platform, e)
+                ad_errors.append({"source": source_dir.name, "platform": platform, "error": str(e)})
+                if not dry_run:
+                    done[platform] = {"ok": False, "ts": time.time(), "error": str(e)[:300]}
+                    _save_posted(source_dir, done)
+                continue
             if dry_run:
                 planned.append({"source": source_dir.name, "platform": platform,
-                                "account": acc.get("username"), "caption": caption})
+                                "account": acc.get("username"), "caption": caption, "ad": ad_info,
+                                "ad_toggles": [s["click_any"] for s in platform_flows.get(platform) or []
+                                               if s.get("ad_toggle")]})
                 per_platform[platform] = per_platform.get(platform, 0) + 1
                 posted_today[platform] = posted_today.get(platform, 0) + 1
                 continue
             remote = f"ags_{device_id}_{day}_{src_idx}_{platform}.mp4"
             if serial is None:  # не dry-run — подключение выполнено выше
                 raise PostError("нет подключения к устройству")
-            ok = post_video(serial, platform, video, caption, remote, flows, screenshots)
+            ok = post_video(serial, platform, video, caption, remote, platform_flows, screenshots)
             log.info("публикация %s/%s/%s → %s: %s", device_id, day, source_dir.name, platform,
                      "OK" if ok else "ОШИБКА")
             done[platform] = {"ok": ok, "ts": time.time(), "account": acc.get("username")}
+            if ad_info is not None:
+                done[platform]["ad"] = ad_info  # след для отчётности перед ОРД
             _save_posted(source_dir, done)
             per_platform[platform] = per_platform.get(platform, 0) + 1
             if ok:
@@ -390,6 +460,8 @@ def post_device(device: dict, cfg_app, day: str | None = None, dry_run: bool = F
     res = {"device": device_id, "day": day, "posted": posted, "failed": failed}
     if blocked:
         res["blocked"] = blocked
+    if ad_errors:
+        res["ad_errors"] = ad_errors
     if dry_run:
         res["planned"] = planned
     return res

@@ -13,6 +13,10 @@
     между аккаунтами, ни между днями, пока дней*N*S <= числа сочетаний
     (10 тегов → 462 сочетания: хватает на 30 аккаунтов × 2 поста × 7 дней).
   * CTA — 3 варианта на нишу и язык, сдвиг по (ранг, день, слот).
+  * реклама (advertising.enabled, устройства с account_type из advertising.account_types):
+    cpa_matcher подбирает оффер по хуку и хэштегам слота, link_rotator строит ссылку на каждую
+    площадку; в слот пишутся ad и description = «Реклама. <рекламодатель>. erid: …» + ссылка.
+    Маркировку площадок и проверку erid делает autoposter (advertising.py).
 Всё детерминировано: повторный запуск даёт тот же план.
 """
 from __future__ import annotations
@@ -280,7 +284,7 @@ def _pick_no_repeat(pool: list[str], last: str | None, rnd) -> str:
 
 def build_plans(cfg: AppConfig, device: dict, plan_days: int, posts_per_day: int,
                 start: date_cls | None = None, rnd: Any = None,
-                cohort: list[str] | None = None) -> dict[str, Any]:
+                cohort: list[str] | None = None, ad_planner: Any = None) -> dict[str, Any]:
     """cohort — device_id всех активных устройств той же ниши (для уникальности между ними).
     rnd оставлен для совместимости и не используется: выбор детерминирован."""
     device_id = validate_device_id(device["device_id"])
@@ -326,8 +330,14 @@ def build_plans(cfg: AppConfig, device: dict, plan_days: int, posts_per_day: int
             if combos:
                 ti = ((day_date.toordinal() * n + rank) * per_day + (idx - 1)) % len(combos)
                 tags = list(combos[tag_perm[ti]])
-            slots.append({"slot": idx, "source_idx": idx, "status": "planned",
-                          "hook": hook, "cta": cta, "hashtags": tags, "platforms": platforms})
+            slot: dict[str, Any] = {"slot": idx, "source_idx": idx, "status": "planned",
+                                    "hook": hook, "cta": cta, "hashtags": tags, "platforms": platforms}
+            if ad_planner is not None:
+                ad = ad_planner.ad_for(device, platforms, hook, tags)
+                if ad is not None:
+                    slot["ad"] = ad
+                    slot["description"] = {p: f"{ad['label']}\n{ad['links'][p]}" for p in platforms}
+            slots.append(slot)
         plan["days"].append({"date": day, "slots": slots})
     return plan
 
@@ -359,14 +369,20 @@ def _write_atomic(path: Path, data: Any) -> None:
 
 
 class Mimic:
-    def __init__(self, cfg: AppConfig, registry: DevicesRegistry | None = None, health: Any = None):
-        """health — AccountHealth; по умолчанию создаётся, если account_health.enabled=true."""
+    def __init__(self, cfg: AppConfig, registry: DevicesRegistry | None = None, health: Any = None,
+                 ad_planner: Any = None):
+        """health — AccountHealth; по умолчанию создаётся, если account_health.enabled=true.
+        ad_planner — advertising.AdPlanner; по умолчанию создаётся, если advertising.enabled=true."""
         self.cfg = cfg
         self.registry = registry or DevicesRegistry.from_config(cfg)
         if health is None:
             from account_health import health_for
             health = health_for(cfg)
         self.health = health
+        if ad_planner is None:
+            from advertising import AdPlanner
+            ad_planner = AdPlanner.from_config(cfg)
+        self.ad_planner = ad_planner
         self.plan_days = max(1, int(cfg.mimic.get("plan_days", 7)))
         self.posts_per_day = max(1, int(cfg.mimic.get("posts_per_account_per_day",
                                                       cfg.forge.videos_per_device_per_day)))
@@ -397,7 +413,8 @@ class Mimic:
                 device = {**device, "accounts": {p: a for p, a in (device.get("accounts") or {}).items()
                                                  if p in allowed}}
             plan = build_plans(self.cfg, device, self.plan_days, self.posts_per_day,
-                               cohort=cohorts.get(device["niche"], [device_id]))
+                               cohort=cohorts.get(device["niche"], [device_id]),
+                               ad_planner=self.ad_planner)
             f = plan_file(self.cfg, device_id)
             old = load_plan(self.cfg, device_id)
             old_slots = {(d["date"], int(s["source_idx"])): s
@@ -407,7 +424,8 @@ class Mimic:
                 d["slots"] = [old_slots.get((d["date"], int(s["source_idx"])), s)
                               for s in d["slots"]]
             _write_atomic(f, plan)
-            out[device_id] = {"plan_file": str(f), "days": len(plan["days"]),
+            ads = sum(1 for d in plan["days"] for s in d["slots"] if s.get("ad"))
+            out[device_id] = {"plan_file": str(f), "days": len(plan["days"]), "ad_slots": ads,
                               "slots_per_day": self.posts_per_day,
                               "cohort_rank": plan["cohort_rank"], "cohort_size": plan["cohort_size"]}
             log.info("mimic %s: %d дней × %d слотов → %s", device_id,
