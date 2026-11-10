@@ -1,0 +1,140 @@
+{
+  "project": "ai-girls-studio",
+  "timezone": "UTC",
+  "gcp": {
+    "project_id": "prometheus-prod-510404",
+    "region": "us-central1",
+    "job_name": "prometheus-generate",
+    "work_bucket": "prometheus-work",
+    "models_bucket": "prometheus-models"
+  },
+  "mimic": {
+    "active_niches": [
+      "wrestling_female",
+      "yoga_female",
+      "fitness_female",
+      "dance_female",
+      "beach_female",
+      "home_female"
+    ],
+    "posts_per_account_per_day": 2,
+    "plan_days": 7
+  },
+  "forge": {
+    "videos_per_device_per_day": 2,
+    "video_duration_sec": [10, 15],
+    "scenes_per_video": [1, 2],
+    "scene_duration_sec": 5,
+    "min_realism_score": 70,
+    "hook_score_threshold": 60,
+    "hook_max_retries": 2,
+    "use_trend_analyzer": true,
+    "flux_enabled": false,
+    "flux_model": "black-forest-labs/FLUX.1-schnell",
+    "llm_model": "Qwen/Qwen2.5-72B-Instruct",
+    "language": "en",
+    "max_parallel_jobs": 8,
+    "job_timeout_sec": 3600,
+    "queue_db": "data/queue.db",
+    "retry_max_attempts": 3,
+    "retry_backoff_sec": 60,
+    "stop_on_failure_ratio": 0.2,
+    "new_account_days": 14
+  },
+  "uniqueness": {
+    "split_screen_enabled": false,
+    "voice_pool": ["voice_01", "voice_02", "voice_03", "voice_04", "voice_05"],
+    "platforms": ["tiktok", "instagram", "youtube"]
+  },
+  "autoposter": {
+    "max_posts_per_platform_per_run": 2,
+    "flows": {}
+  },
+  "monetization": {
+    "tiers": [
+      { "id": "sfw", "price": 7.99, "name": "SFW" },
+      { "id": "nsfw", "price": 12.99, "name": "NSFW" },
+      { "id": "vip", "price": 29.99, "name": "VIP" }
+    ],
+    "ppv": {
+      "price_min": 5,
+      "price_max": 40,
+      "custom_min": 75,
+      "custom_max": 250,
+      "funnel_steps": ["teaser", "offer", "reminder", "close"],
+      "offer_after_messages": 3,
+      "step_interval_hours": 24,
+      "max_offers_per_week": 3,
+      "funnel_cooldown_days": 14,
+      "close_discount": 0.2,
+      "ab_test": true,
+      "auto_send": false
+    },
+    "retention": {
+      "inactive_days": 5,
+      "min_lifetime_spend": 20,
+      "cooldown_days": 7,
+      "max_checkins_without_reply": 2,
+      "auto_send": false
+    },
+    "disclosure": {
+      "enabled": true,
+      "text": "AI-generated character",
+      "platforms": ["fanvue", "onlyfans", "tiktok", "instagram", "youtube", "patreon", "telegram"]
+    },
+    "anlora": { "revenue_share": 0.2 }
+  },
+  "scheduler": {},
+  "devices_registry": {
+    "require_username_with_niche_marker": true,
+    "niche_markers": {
+      "wrestling_female": ".fight",
+      "yoga_female": ".zen",
+      "fitness_female": ".lift",
+      "dance_female": ".move",
+      "beach_female": ".wave",
+      "home_female": ".cozy"
+    }
+  },
+  "trend_analyzer": {
+    "enabled": true,
+    "apify_actor": "harshmaur~tiktok-scraper",
+    "params": {
+      "outlier_multiplier": 3.0,
+      "min_engagement": 0.04,
+      "min_plays": 1000,
+      "max_items": 20,
+      "results_per_profile": 30
+    },
+    "profiles": {
+      "wrestling_female": ["wrestlingqueen1", "fightgirl_lana", "grappling_amy", "ringrose_mma", "matqueen_sofia"],
+      "yoga_female": ["yogawithlena", "flowgirl_anna", "zen_maya", "stretch_kira", "yogini_nina"],
+      "fitness_female": ["fitgirl_katya", "liftqueen_olga", "gymgirl_vika", "strong_lera", "iron_anna"],
+      "dance_female": ["dancegirl_mia", "moves_lola", "rhythm_kira", "dancequeen_sia", "groove_anna"],
+      "beach_female": ["beachgirl_sun", "wave_luna", "surf_anya", "sandy_mia", "ocean_kira"],
+      "home_female": ["cozygirl_nina", "home_lara", "soft_mia", "blanket_kira", "morning_anna"]
+    }
+  },
+  "paths": {
+    "models": "models",
+    "videos": "data/videos",
+    "post_plans": "data/post_plans",
+    "forge_checkpoints": "data/forge_checkpoints",
+    "trend_analysis": "data/trend_analysis",
+    "trends_cache": "data/trends_cache",
+    "stock_cache": "data/stock_cache",
+    "stock_downloads": "data/stock_downloads",
+    "hashtag_seeds": "data/hashtag_seeds.json",
+    "analytics": "data/analytics",
+    "affiliate": "data/affiliate",
+    "cross_promo": "data/cross_promo",
+    "logs": "logs"
+  },
+  "trends_collector": {
+    "active_niches": [
+      "wrestling_female", "yoga_female", "fitness_female",
+      "dance_female", "beach_female", "home_female"
+    ],
+    "sources": ["tiktok", "youtube", "google"]
+  }
+}

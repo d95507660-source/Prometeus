@@ -1,0 +1,339 @@
+"""config_loader.py — загрузка config.json + niches.json, валидация, логирование.
+
+Все относительные пути (data/..., models/..., logs/...) считаются от папки,
+где лежит config.json, а не от текущей директории запуска.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+log = logging.getLogger(__name__)
+
+DEFAULT_PATHS = {
+    "models": "models",
+    "videos": "data/videos",
+    "post_plans": "data/post_plans",
+    "forge_checkpoints": "data/forge_checkpoints",
+    "trend_analysis": "data/trend_analysis",
+    "trends_cache": "data/trends_cache",
+    "stock_cache": "data/stock_cache",
+    "stock_downloads": "data/stock_downloads",
+    "hashtag_seeds": "data/hashtag_seeds.json",
+    "analytics": "data/analytics",
+    "affiliate": "data/affiliate",
+    "cross_promo": "data/cross_promo",
+    "logs": "logs",
+    "devices": "devices.json",
+    "niches": "niches.json",
+}
+
+
+@dataclass
+class GcpConfig:
+    project_id: str
+    region: str = "us-central1"
+    job_name: str = "prometheus-generate"
+    work_bucket: str = "prometheus-work"
+    models_bucket: str = "prometheus-models"
+
+
+@dataclass
+class ForgeConfig:
+    videos_per_device_per_day: int = 2
+    video_duration_sec: list[int] = field(default_factory=lambda: [10, 15])
+    scenes_per_video: list[int] = field(default_factory=lambda: [1, 2])
+    scene_duration_sec: int = 5
+    min_realism_score: int = 70
+    hook_score_threshold: int = 60
+    hook_max_retries: int = 2
+    use_trend_analyzer: bool = True
+    flux_enabled: bool = False
+    flux_model: str = "black-forest-labs/FLUX.1-schnell"
+    llm_model: str = "Qwen/Qwen2.5-72B-Instruct"
+    language: str = "en"
+    max_parallel_jobs: int = 4
+    job_timeout_sec: int = 3600
+    # очередь генерации (forge_stage.py / job_queue.py)
+    queue_db: str = "data/queue.db"           # относительный путь — от папки config.json
+    retry_max_attempts: int = 3               # всего попыток на задачу, включая первую
+    retry_backoff_sec: float = 60.0           # пауза перед повтором: backoff * 2^(попытка-1)
+    stop_on_failure_ratio: float = 0.2        # доля окончательно упавших задач → остановка, код 3
+    new_account_days: int = 14                # аккаунты моложе — приоритет 10 (прогрев), иначе 5
+
+
+@dataclass
+class AppConfig:
+    project: str
+    gcp: GcpConfig
+    mimic: dict
+    forge: ForgeConfig
+    uniqueness: dict
+    monetization: dict
+    devices_registry: dict
+    trend_analyzer: dict
+    paths: dict
+    trends_collector: dict
+    niches: dict
+    raw: dict
+    root: Path
+    config_path: Path
+    timezone: str = "UTC"
+
+    @property
+    def gcp_project_id(self) -> str:
+        return self.gcp.project_id
+
+    def path(self, key: str) -> Path:
+        """Абсолютный путь по ключу из paths (с учётом DEFAULT_PATHS)."""
+        rel = self.paths.get(key) or DEFAULT_PATHS.get(key)
+        if rel is None:
+            raise KeyError(f"неизвестный ключ paths: {key}")
+        p = Path(rel)
+        return p if p.is_absolute() else (self.root / p)
+
+    @property
+    def videos_root(self) -> Path:
+        return self.path("videos")
+
+    def today(self) -> str:
+        return today_str(self.timezone)
+
+    @property
+    def queue_db_path(self) -> Path:
+        p = Path(self.forge.queue_db)
+        return p if p.is_absolute() else (self.root / p)
+
+
+def today_str(tz_name: str = "UTC") -> str:
+    """Сегодняшняя дата YYYY-MM-DD в часовом поясе проекта."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+# ---------------------------------------------------------------------------
+# Логирование: консоль + logs/<name>.log, повторный вызов ничего не дублирует
+# ---------------------------------------------------------------------------
+
+def setup_logging(name: str = "orchestrator", logs_dir: str | Path = "logs",
+                  level: str | None = None) -> None:
+    level = level or os.getenv("LOG_LEVEL", "INFO")
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    if not any(getattr(h, "_ags_console", False) for h in root.handlers):
+        # убираем обработчики basicConfig, чтобы не было двойного вывода
+        for h in list(root.handlers):
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+                root.removeHandler(h)
+        ch = logging.StreamHandler(sys.stderr)
+        ch.setFormatter(fmt)
+        ch._ags_console = True  # type: ignore[attr-defined]
+        root.addHandler(ch)
+
+    logs_dir = Path(logs_dir)
+    target = (logs_dir / f"{name}.log").resolve()
+    if any(isinstance(h, logging.FileHandler) and Path(h.baseFilename) == target
+           for h in root.handlers):
+        return
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        from logging.handlers import RotatingFileHandler
+        fh = RotatingFileHandler(target, maxBytes=10 * 1024 * 1024, backupCount=3,
+                                 encoding="utf-8")
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    except Exception as e:  # нет прав на запись и т.п. — работаем только в консоль
+        sys.stderr.write(f"[config_loader] не удалось открыть лог-файл {target}: {e}\n")
+
+
+# ---------------------------------------------------------------------------
+# Валидация
+# ---------------------------------------------------------------------------
+
+def _validate(cfg: AppConfig) -> None:
+    errors: list[str] = []
+    active = list(cfg.mimic.get("active_niches", []))
+    unknown = [n for n in active if n not in cfg.niches]
+    if unknown:
+        errors.append(f"active_niches нет в niches.json: {sorted(unknown)}")
+
+    markers = cfg.devices_registry.get("niche_markers", {})
+    no_marker = [n for n in active
+                 if not markers.get(n) and not cfg.niches.get(n, {}).get("marker")]
+    if no_marker and cfg.devices_registry.get("require_username_with_niche_marker", True):
+        errors.append(f"нет маркера для ниш: {no_marker}")
+
+    f = cfg.forge
+    if f.videos_per_device_per_day < 1:
+        errors.append("forge.videos_per_device_per_day должен быть >= 1")
+    if f.scene_duration_sec < 1:
+        errors.append("forge.scene_duration_sec должен быть >= 1")
+    if (len(f.scenes_per_video) != 2 or f.scenes_per_video[0] < 1
+            or f.scenes_per_video[0] > f.scenes_per_video[1]):
+        errors.append("forge.scenes_per_video должен быть [min, max], min >= 1")
+    if not 0 <= f.min_realism_score <= 100 or not 0 <= f.hook_score_threshold <= 100:
+        errors.append("пороги min_realism_score / hook_score_threshold должны быть 0..100")
+    if f.hook_max_retries < 0:
+        errors.append("forge.hook_max_retries должен быть >= 0")
+    if not 1 <= f.max_parallel_jobs <= 64:
+        errors.append("forge.max_parallel_jobs должен быть 1..64")
+    if f.retry_max_attempts < 1:
+        errors.append("forge.retry_max_attempts должен быть >= 1")
+    if f.retry_backoff_sec < 0:
+        errors.append("forge.retry_backoff_sec должен быть >= 0")
+    if not 0 < f.stop_on_failure_ratio <= 1:
+        errors.append("forge.stop_on_failure_ratio должен быть в (0, 1]")
+    if f.new_account_days < 0:
+        errors.append("forge.new_account_days должен быть >= 0")
+    if not str(f.queue_db or "").strip() or "\x00" in str(f.queue_db):
+        errors.append("forge.queue_db пустой или некорректный")
+
+    ppd = int(cfg.mimic.get("posts_per_account_per_day", f.videos_per_device_per_day))
+    if ppd != f.videos_per_device_per_day:
+        log.warning("mimic.posts_per_account_per_day=%d не равен forge.videos_per_device_per_day=%d — "
+                    "часть слотов останется без видео или часть видео без слотов",
+                    ppd, f.videos_per_device_per_day)
+
+    ppv = cfg.monetization.get("ppv", {})
+    if ppv and not (0 < ppv.get("price_min", 1) <= ppv.get("price_max", 1)):
+        errors.append("monetization.ppv: нужно 0 < price_min <= price_max")
+    if ppv and not (0 < ppv.get("custom_min", 1) <= ppv.get("custom_max", 1)):
+        errors.append("monetization.ppv: нужно 0 < custom_min <= custom_max")
+
+    if errors:
+        raise ValueError("ошибки в конфиге:\n  - " + "\n  - ".join(errors))
+
+
+# ---------------------------------------------------------------------------
+# Загрузка
+# ---------------------------------------------------------------------------
+
+def _read_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise
+    except json.JSONDecodeError as e:
+        raise ValueError(f"битый JSON в {path}: {e}") from e
+
+
+def load_config(config_path: str | Path = "config.json",
+                niches_path: str | Path | None = None,
+                log_name: str | None = None) -> AppConfig:
+    config_path = Path(config_path).resolve()
+    raw = _read_json(config_path)
+    root = config_path.parent
+
+    paths = {**DEFAULT_PATHS, **(raw.get("paths") or {})}
+    niches_file = Path(niches_path) if niches_path else Path(paths["niches"])
+    if not niches_file.is_absolute():
+        niches_file = root / niches_file
+    niches: dict = {}
+    if niches_file.exists():
+        niches = (_read_json(niches_file) or {}).get("niches", {})
+    else:
+        log.warning("niches.json не найден: %s", niches_file)
+
+    logs_dir = Path(paths["logs"])
+    if not logs_dir.is_absolute():
+        logs_dir = root / logs_dir
+    setup_logging(log_name or "orchestrator", logs_dir)
+
+    gcp_raw = raw.get("gcp") or {}
+    if not gcp_raw.get("project_id") and not os.getenv("GCP_PROJECT_ID"):
+        raise ValueError("в config.json нет gcp.project_id (и не задан GCP_PROJECT_ID)")
+
+    forge_raw = raw.get("forge") or {}
+    unknown_forge = set(forge_raw) - set(ForgeConfig.__dataclass_fields__)
+    if unknown_forge:
+        log.warning("неизвестные ключи forge в config.json (игнорирую): %s", sorted(unknown_forge))
+
+    cfg = AppConfig(
+        project=raw.get("project", "ai-girls-studio"),
+        gcp=GcpConfig(
+            project_id=gcp_raw.get("project_id") or os.getenv("GCP_PROJECT_ID", ""),
+            region=gcp_raw.get("region", "us-central1"),
+            job_name=gcp_raw.get("job_name", "prometheus-generate"),
+            work_bucket=gcp_raw.get("work_bucket", "prometheus-work"),
+            models_bucket=gcp_raw.get("models_bucket", "prometheus-models"),
+        ),
+        mimic=raw.get("mimic", {}),
+        forge=ForgeConfig(**{k: v for k, v in forge_raw.items()
+                             if k in ForgeConfig.__dataclass_fields__}),
+        uniqueness=raw.get("uniqueness", {}),
+        monetization=raw.get("monetization", {}),
+        devices_registry=raw.get("devices_registry", {}),
+        trend_analyzer=raw.get("trend_analyzer", {}),
+        paths=paths,
+        trends_collector=raw.get("trends_collector", {}),
+        niches=niches,
+        raw=raw,
+        root=root,
+        config_path=config_path,
+        timezone=raw.get("timezone", "UTC"),
+    )
+    _validate(cfg)
+    log.debug("config loaded: project=%s niches=%d root=%s", cfg.project, len(niches), root)
+    return cfg
+
+
+def apply_env_overrides(cfg: AppConfig) -> AppConfig:
+    env_map = {
+        "GCP_PROJECT_ID": "project_id",
+        "GCP_REGION": "region",
+        "GCP_JOB_NAME": "job_name",
+        "GCS_WORK_BUCKET": "work_bucket",
+        "GCS_MODELS_BUCKET": "models_bucket",
+    }
+    for env, attr in env_map.items():
+        val = os.getenv(env)
+        if val:
+            setattr(cfg.gcp, attr, val)
+    return cfg
+
+
+def load_dotenv_if_present(root: str | Path | None = None) -> None:
+    """Подхватывает .env, если установлен python-dotenv (не перезаписывает уже заданные переменные)."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    env_file = Path(root or Path(__file__).resolve().parent) / ".env"
+    if env_file.exists():
+        load_dotenv(env_file, override=False)
+
+
+def add_common_args(ap) -> None:
+    ap.add_argument("--config", default=str(Path(__file__).resolve().parent / "config.json"))
+
+
+def cli_config(log_name: str, argv: list[str] | None = None, extra=None):
+    """Общий разбор аргументов для всех CLI: --config + свои аргументы через extra(ap)."""
+    import argparse
+    ap = argparse.ArgumentParser()
+    add_common_args(ap)
+    if extra:
+        extra(ap)
+    a = ap.parse_args(argv)
+    load_dotenv_if_present(Path(a.config).resolve().parent)
+    cfg = apply_env_overrides(load_config(a.config, log_name=log_name))
+    return cfg, a
+
+
+if __name__ == "__main__":
+    c, _ = cli_config("config_loader")
+    sys.stdout.write(json.dumps({"project": c.project, "root": str(c.root), "gcp": c.gcp.__dict__,
+                                 "forge": c.forge.__dict__, "niches": list(c.niches.keys()),
+                                 "timezone": c.timezone, "today": c.today()},
+                                indent=2, ensure_ascii=False) + "\n")

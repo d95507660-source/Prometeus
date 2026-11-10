@@ -140,6 +140,7 @@ class ForgeResult:
     realism_score: int = 0
     status: str = "unknown"
     error: str | None = None
+    gcp_execution_name: str | None = None  # имя выполнения Cloud Run (для очереди и отмены)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -747,7 +748,10 @@ class Forge:
 
         res = ForgeResult(device_id, source_idx, day, out.get("local_path"), hook, script, scenes,
                           realism, out.get("status", "unknown"),
-                          None if out.get("status") == "ok" else json.dumps(out, default=str)[:500])
+                          None if out.get("status") == "ok" else json.dumps(out, default=str)[:500],
+                          # gcp_client.run_job отдаёт имя в ключе "execution"
+                          # [ПРОВЕРИТЬ: пробрасывает ли его run_generation_gcp.generate_for_device]
+                          gcp_execution_name=out.get("execution") or out.get("execution_name"))
         _write_checkpoint(self.cfg, res)
         return res
 
