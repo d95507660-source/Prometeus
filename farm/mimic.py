@@ -359,9 +359,14 @@ def _write_atomic(path: Path, data: Any) -> None:
 
 
 class Mimic:
-    def __init__(self, cfg: AppConfig, registry: DevicesRegistry | None = None):
+    def __init__(self, cfg: AppConfig, registry: DevicesRegistry | None = None, health: Any = None):
+        """health — AccountHealth; по умолчанию создаётся, если account_health.enabled=true."""
         self.cfg = cfg
         self.registry = registry or DevicesRegistry.from_config(cfg)
+        if health is None:
+            from account_health import health_for
+            health = health_for(cfg)
+        self.health = health
         self.plan_days = max(1, int(cfg.mimic.get("plan_days", 7)))
         self.posts_per_day = max(1, int(cfg.mimic.get("posts_per_account_per_day",
                                                       cfg.forge.videos_per_device_per_day)))
@@ -379,6 +384,18 @@ class Mimic:
         out: dict[str, Any] = {}
         for device in devices:
             device_id = validate_device_id(device["device_id"])
+            if self.health is not None and self.health.enabled:
+                allowed = set(self.health.plan_platforms(device))
+                skipped = sorted(p for p, a in (device.get("accounts") or {}).items()
+                                 if a.get("enabled", True) and p not in allowed)
+                if skipped:
+                    log.warning("mimic %s: без плана (banned/shadowban_suspect): %s",
+                                device_id, skipped)
+                if not allowed:
+                    out[device_id] = {"skipped": "все аккаунты banned или shadowban_suspect"}
+                    continue
+                device = {**device, "accounts": {p: a for p, a in (device.get("accounts") or {}).items()
+                                                 if p in allowed}}
             plan = build_plans(self.cfg, device, self.plan_days, self.posts_per_day,
                                cohort=cohorts.get(device["niche"], [device_id]))
             f = plan_file(self.cfg, device_id)

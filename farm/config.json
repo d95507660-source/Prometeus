@@ -41,6 +41,18 @@
     "stop_on_failure_ratio": 0.2,
     "new_account_days": 14
   },
+  "account_health": {
+    "enabled": true,
+    "new_account_days": 7,
+    "max_posts_per_day_progression": [1, 2, 3],
+    "shadowban_views_threshold": 50,
+    "shadowban_check_hours": 48,
+    "shadowban_max_post_age_hours": 168,
+    "shadowban_min_posts": 1,
+    "ban_error_markers": ["suspended", "banned", "terminated", "disabled"],
+    "graph_api_version": "v21.0",
+    "request_timeout_sec": 20
+  },
   "uniqueness": {
     "split_screen_enabled": false,
     "voice_pool": ["voice_01", "voice_02", "voice_03", "voice_04", "voice_05"],
@@ -128,6 +140,7 @@
     "analytics": "data/analytics",
     "affiliate": "data/affiliate",
     "cross_promo": "data/cross_promo",
+    "accounts": "data/accounts",
     "logs": "logs"
   },
   "trends_collector": {

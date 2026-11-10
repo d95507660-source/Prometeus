@@ -274,6 +274,13 @@ def stage_forge(cfg: Any, registry: Any = None, resume: bool = False,
         run_day = day or cfg.today()
         scope_days = [run_day]
         devices = registry.get_active_devices(device_ids=device_ids)
+        from account_health import health_for
+        health = health_for(cfg)
+        if health is not None:
+            banned = [d["device_id"] for d in devices if not health.device_usable(d)]
+            if banned:
+                log.warning("forge: устройства со всеми аккаунтами в бане не генерируются: %s", banned)
+                devices = [d for d in devices if d["device_id"] not in banned]
         if not devices:
             log.warning("forge: нет активных устройств")
         items = []

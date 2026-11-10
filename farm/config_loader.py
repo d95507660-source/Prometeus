@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ DEFAULT_PATHS = {
     "affiliate": "data/affiliate",
     "cross_promo": "data/cross_promo",
     "logs": "logs",
+    "accounts": "data/accounts",
     "devices": "devices.json",
     "niches": "niches.json",
 }
@@ -69,6 +71,21 @@ class ForgeConfig:
 
 
 @dataclass
+class AccountHealthConfig:
+    enabled: bool = False                     # нет блока в config.json — модуль выключен (как раньше)
+    new_account_days: int = 7                 # столько дней новый аккаунт не публикует
+    max_posts_per_day_progression: list[int] = field(default_factory=lambda: [1, 2, 3])
+    shadowban_views_threshold: int = 50       # средние просмотры ниже → shadowban_suspect
+    shadowban_check_hours: int = 48           # пост «созрел» для оценки через столько часов
+    shadowban_max_post_age_hours: int = 168   # посты старше не учитываются
+    shadowban_min_posts: int = 1              # минимум созревших постов для вывода
+    ban_error_markers: list[str] = field(default_factory=lambda: [
+        "suspended", "banned", "terminated", "disabled"])
+    graph_api_version: str = "v21.0"          # Instagram Graph API [ПРОВЕРИТЬ ПО ДОКАМ]
+    request_timeout_sec: float = 20.0
+
+
+@dataclass
 class AppConfig:
     project: str
     gcp: GcpConfig
@@ -85,6 +102,7 @@ class AppConfig:
     root: Path
     config_path: Path
     timezone: str = "UTC"
+    account_health: AccountHealthConfig = field(default_factory=AccountHealthConfig)
 
     @property
     def gcp_project_id(self) -> str:
@@ -205,6 +223,24 @@ def _validate(cfg: AppConfig) -> None:
                     "часть слотов останется без видео или часть видео без слотов",
                     ppd, f.videos_per_device_per_day)
 
+    h = cfg.account_health
+    prog = h.max_posts_per_day_progression
+    if (not isinstance(prog, list) or not prog
+            or not all(isinstance(x, int) and not isinstance(x, bool) and x >= 1 for x in prog)):
+        errors.append("account_health.max_posts_per_day_progression: непустой список целых >= 1")
+    if h.new_account_days < 0:
+        errors.append("account_health.new_account_days должен быть >= 0")
+    if h.shadowban_views_threshold < 0:
+        errors.append("account_health.shadowban_views_threshold должен быть >= 0")
+    if h.shadowban_check_hours < 1 or h.shadowban_max_post_age_hours < h.shadowban_check_hours:
+        errors.append("account_health: нужно 1 <= shadowban_check_hours <= shadowban_max_post_age_hours")
+    if h.shadowban_min_posts < 1:
+        errors.append("account_health.shadowban_min_posts должен быть >= 1")
+    if not re.fullmatch(r"v\d{1,3}\.\d{1,2}", str(h.graph_api_version)):
+        errors.append("account_health.graph_api_version должен быть вида v21.0")
+    if not h.ban_error_markers or not all(isinstance(m, str) and m.strip() for m in h.ban_error_markers):
+        errors.append("account_health.ban_error_markers: непустой список строк")
+
     ppv = cfg.monetization.get("ppv", {})
     if ppv and not (0 < ppv.get("price_min", 1) <= ppv.get("price_max", 1)):
         errors.append("monetization.ppv: нужно 0 < price_min <= price_max")
@@ -259,6 +295,12 @@ def load_config(config_path: str | Path = "config.json",
     if unknown_forge:
         log.warning("неизвестные ключи forge в config.json (игнорирую): %s", sorted(unknown_forge))
 
+    health_raw = raw.get("account_health") or {}
+    unknown_health = set(health_raw) - set(AccountHealthConfig.__dataclass_fields__)
+    if unknown_health:
+        log.warning("неизвестные ключи account_health в config.json (игнорирую): %s",
+                    sorted(unknown_health))
+
     cfg = AppConfig(
         project=raw.get("project", "ai-girls-studio"),
         gcp=GcpConfig(
@@ -282,6 +324,8 @@ def load_config(config_path: str | Path = "config.json",
         root=root,
         config_path=config_path,
         timezone=raw.get("timezone", "UTC"),
+        account_health=AccountHealthConfig(**{k: v for k, v in health_raw.items()
+                                              if k in AccountHealthConfig.__dataclass_fields__}),
     )
     _validate(cfg)
     log.debug("config loaded: project=%s niches=%d root=%s", cfg.project, len(niches), root)
