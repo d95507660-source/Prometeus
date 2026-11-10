@@ -57,10 +57,11 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 from diversity import atomic_write_text
 
@@ -302,6 +303,7 @@ def gcp_budget_command(cfg_budget: Any, billing_account: str,
 
 def main() -> None:
     import shlex
+
     from config_loader import cli_config
 
     def extra(ap):

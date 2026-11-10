@@ -140,7 +140,7 @@ def test_new_account_blocked_then_active_with_progression(env):
     cfg, _, health = env
     d = device()
     seen = []
-    for day in range(11):
+    for _day in range(11):
         ok, _ = health.can_post("aria_fight", "tiktok", device=d)
         seen.append((ok, health.posts_allowed("aria_fight", "tiktok", device=d)))
         CLOCK.advance(days=1)

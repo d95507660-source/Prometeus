@@ -30,8 +30,7 @@ from typing import Any
 
 from config_loader import AppConfig
 from devices_registry import DevicesRegistry
-from diversity import (atomic_write_text, cohort_rank, niche_cohorts, stable_int,
-                       validate_day, validate_device_id)
+from diversity import atomic_write_text, cohort_rank, niche_cohorts, stable_int, validate_day, validate_device_id
 
 log = logging.getLogger(__name__)
 
@@ -699,12 +698,12 @@ class Forge:
         Импорт здесь: dry-run работает без GCP и без воркера."""
         mode = getattr(getattr(self.cfg, "gcp", None), "mode", "cloud")
         if mode == "local":
-            from run_generation_local import generate_for_device
+            from run_generation_local import generate_for_device as local_gen
             lc = self.cfg.local
-            return generate_for_device, {"server_url": lc.server_url,
+            return local_gen, {"server_url": lc.server_url,
                                          "poll_interval_sec": float(lc.poll_interval_sec)}
-        from run_generation_gcp import generate_for_device
-        return generate_for_device, {}
+        from run_generation_gcp import generate_for_device as cloud_gen
+        return cloud_gen, {}
 
     def plan_script(self, device: dict, source_idx: int, day: str) -> tuple[dict, HookResult, list[Scene]]:
         """Сценарий + сцены без генерации (используется generate_one и --dry-run)."""

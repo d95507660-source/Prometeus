@@ -42,8 +42,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 log = logging.getLogger("model_server")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
@@ -723,6 +724,7 @@ def run_job() -> dict:
 
 def serve(do_warm: bool = False) -> None:
     import hmac
+
     from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
     from fastapi.responses import FileResponse
     from pydantic import BaseModel, Field
@@ -779,7 +781,7 @@ def serve(do_warm: bool = False) -> None:
                                  fetch, store)
         except Exception as e:
             log.exception("generate упал")
-            raise HTTPException(status_code=500, detail=str(e)[:500])
+            raise HTTPException(status_code=500, detail=str(e)[:500]) from e
         return FileResponse(str(final), media_type="video/mp4", filename=f"{p.device_id}.mp4")
 
     import uvicorn

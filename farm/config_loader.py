@@ -204,7 +204,7 @@ def today_str(tz_name: str = "UTC") -> str:
 
 def setup_logging(name: str = "orchestrator", logs_dir: str | Path = "logs",
                   level: str | None = None) -> None:
-    level = level or os.getenv("LOG_LEVEL", "INFO")
+    level = level or os.getenv("LOG_LEVEL") or "INFO"
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -452,7 +452,7 @@ def load_config(config_path: str | Path = "config.json",
     cfg = AppConfig(
         project=raw.get("project", "ai-girls-studio"),
         gcp=GcpConfig(
-            project_id=gcp_raw.get("project_id") or os.getenv("GCP_PROJECT_ID", ""),
+            project_id=str(gcp_raw.get("project_id") or os.getenv("GCP_PROJECT_ID") or ""),
             region=gcp_raw.get("region", "us-central1"),
             job_name=gcp_raw.get("job_name", "prometheus-generate"),
             work_bucket=gcp_raw.get("work_bucket", "prometheus-work"),

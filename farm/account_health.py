@@ -38,11 +38,13 @@ import os
 import re
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date as date_cls, datetime, timedelta, timezone
+from datetime import date as date_cls
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from diversity import atomic_write_text, validate_device_id
 
@@ -595,7 +597,8 @@ class AccountHealth:
         if not posts:
             return
         earliest = min(p.published_at for p in posts)
-        if st.get("first_post_at") is None or _parse_iso(st["first_post_at"]) > earliest:
+        known_first = _parse_iso(st.get("first_post_at"))
+        if known_first is None or known_first > earliest:
             st["first_post_at"] = _iso(earliest)
         # аккаунт уже вёлся до подключения — не держим его «новым»
         if st.get("created_source") == "first_seen" \
@@ -609,7 +612,7 @@ class AccountHealth:
         matured = [p for p in posts if lo <= p.published_at <= hi and p.views is not None]
         if len(matured) < int(self.hc.shadowban_min_posts):
             return  # не на чем судить — флаг не трогаем
-        avg = sum(p.views for p in matured) / len(matured)
+        avg = sum(p.views or 0 for p in matured) / len(matured)
         st["avg_views_48h"] = round(avg, 1)
         threshold = int(self.hc.shadowban_views_threshold)
         if avg < threshold and not st.get("shadowban_suspect"):
@@ -691,7 +694,7 @@ def main() -> None:
         try:
             dev, plat, status = item.split(":")
         except ValueError:
-            raise SystemExit(f"--set ожидает DEVICE:PLATFORM:STATUS, получено {item!r}")
+            raise SystemExit(f"--set ожидает DEVICE:PLATFORM:STATUS, получено {item!r}") from None
         health.set_status(dev, plat, status)
     if a.set:
         return

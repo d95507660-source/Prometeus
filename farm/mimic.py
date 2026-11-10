@@ -24,14 +24,14 @@ import re
 import string
 import sys
 import time
-from datetime import date as date_cls, timedelta
+from datetime import date as date_cls
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 from config_loader import AppConfig
 from devices_registry import DevicesRegistry
-from diversity import (atomic_write_text, cohort_rank, niche_cohorts, permutation,
-                       validate_device_id)
+from diversity import atomic_write_text, cohort_rank, niche_cohorts, permutation, validate_device_id
 
 log = logging.getLogger(__name__)
 

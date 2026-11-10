@@ -37,9 +37,10 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from job_queue import Job, JobQueue, account_age_days, priority_for_age
 

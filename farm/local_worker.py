@@ -40,10 +40,11 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
@@ -115,11 +116,12 @@ class LocalWorker:
     # --- фабрика с настоящими model_server и torch ---------------------------
 
     @classmethod
-    def from_config(cls, cfg: Any) -> "LocalWorker":
+    def from_config(cls, cfg: Any) -> LocalWorker:
         # model_server читает MODELS_DIR и WAN_* при импорте — окружение до импорта
         os.environ.setdefault("MODELS_DIR", str(cfg.local.models_dir))
         os.environ["STORAGE_BACKEND"] = "local"
         import torch
+
         import model_server
         if not torch.cuda.is_available():
             raise SystemExit("CUDA недоступна: local_worker рассчитан на GPU")
@@ -207,7 +209,8 @@ class LocalWorker:
         st = self.status(job_id)
         if not st or not st["output_ready"]:
             return None
-        return Path(self._payload_row(job_id)["output_path"])
+        row = self._payload_row(job_id)
+        return Path(row["output_path"]) if row is not None else None
 
     def vram(self) -> dict:
         free, total = self.cuda.mem_get_info()
@@ -398,7 +401,7 @@ def create_app(worker: LocalWorker, token: str | None):
         try:
             return worker.submit(req.model_dump(exclude_none=True))
         except RuntimeError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+            raise HTTPException(status_code=503, detail=str(e)) from e
 
     @app.get("/status/{job_id}", dependencies=[Depends(auth)])
     def status(job_id: int):

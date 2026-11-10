@@ -3,7 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const ROOT = __dirname;
+// PROMETHEUS_ROOT — другой корень данных (тесты, второй экземпляр); по умолчанию папка проекта
+const ROOT = process.env.PROMETHEUS_ROOT ? path.resolve(process.env.PROMETHEUS_ROOT) : __dirname;
 const MODELS_DIR = path.join(ROOT, 'models');
 const DATA_DIR = path.join(ROOT, 'data');
 const SAFE_ID = /^[A-Za-z0-9_\-]{1,64}$/;

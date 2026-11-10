@@ -24,11 +24,12 @@ import re
 import socket
 import sqlite3
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date as date_cls
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -96,7 +97,7 @@ class Job:
     gcp_execution_name: str | None
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "Job":
+    def from_row(cls, row: sqlite3.Row) -> Job:
         return cls(**{k: row[k] for k in cls.__dataclass_fields__})
 
 
@@ -143,7 +144,7 @@ class JobQueue:
                             isolation_level=None)
         c.row_factory = sqlite3.Row
         try:
-            c.execute("PRAGMA busy_timeout = %d" % int(self.busy_timeout_sec * 1000))
+            c.execute(f"PRAGMA busy_timeout = {int(self.busy_timeout_sec * 1000)}")
             c.execute("PRAGMA synchronous = NORMAL")
             yield c
         finally:

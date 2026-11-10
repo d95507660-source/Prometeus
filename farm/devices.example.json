@@ -1,0 +1,74 @@
+{
+  "devices": [
+    {
+      "device_id": "aria_fight",
+      "model_name": "Aria",
+      "niche": "wrestling_female",
+      "marker": ".fight",
+      "accounts": {
+        "tiktok": { "username": "aria.fight", "enabled": true },
+        "instagram": { "username": "aria.fight", "enabled": true },
+        "youtube": { "username": "aria.fight", "enabled": true }
+      },
+      "adb": { "host": "192.168.1.101", "port": 5555 },
+      "voice_id": "voice_01",
+      "enabled": true
+    },
+    {
+      "device_id": "mia_fight",
+      "model_name": "Mia",
+      "niche": "wrestling_female",
+      "marker": ".fight",
+      "accounts": {
+        "tiktok": { "username": "mia.fight", "enabled": true },
+        "instagram": { "username": "mia.fight", "enabled": true },
+        "youtube": { "username": "mia.fight", "enabled": true }
+      },
+      "adb": { "host": "192.168.1.102", "port": 5555 },
+      "voice_id": "voice_02",
+      "enabled": true
+    },
+    {
+      "device_id": "lena_fight",
+      "model_name": "Lena",
+      "niche": "wrestling_female",
+      "marker": ".fight",
+      "accounts": {
+        "tiktok": { "username": "lena.fight", "enabled": true },
+        "instagram": { "username": "lena.fight", "enabled": true },
+        "youtube": { "username": "lena.fight", "enabled": true }
+      },
+      "adb": { "host": "192.168.1.103", "port": 5555 },
+      "voice_id": "voice_03",
+      "enabled": true
+    },
+    {
+      "device_id": "kira_fight",
+      "model_name": "Kira",
+      "niche": "wrestling_female",
+      "marker": ".fight",
+      "accounts": {
+        "tiktok": { "username": "kira.fight", "enabled": true },
+        "instagram": { "username": "kira.fight", "enabled": true },
+        "youtube": { "username": "kira.fight", "enabled": true }
+      },
+      "adb": { "host": "192.168.1.104", "port": 5555 },
+      "voice_id": "voice_04",
+      "enabled": true
+    },
+    {
+      "device_id": "nina_fight",
+      "model_name": "Nina",
+      "niche": "wrestling_female",
+      "marker": ".fight",
+      "accounts": {
+        "tiktok": { "username": "nina.fight", "enabled": true },
+        "instagram": { "username": "nina.fight", "enabled": true },
+        "youtube": { "username": "nina.fight", "enabled": true }
+      },
+      "adb": { "host": "192.168.1.105", "port": 5555 },
+      "voice_id": "voice_05",
+      "enabled": true
+    }
+  ]
+}

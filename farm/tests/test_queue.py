@@ -21,8 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 import config_loader  # noqa: E402
 import forge_stage  # noqa: E402
-from job_queue import (PRIORITY_NEW, PRIORITY_NORMAL, JobQueue, account_age_days,  # noqa: E402
-                       priority_for_age)
+from job_queue import PRIORITY_NEW, PRIORITY_NORMAL, JobQueue, account_age_days, priority_for_age  # noqa: E402
 
 N_ACCOUNTS = 30
 PER_DAY = 2

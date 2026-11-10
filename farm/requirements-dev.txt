@@ -1,0 +1,14 @@
+# Зависимости для тестов, линтеров и CI (Python 3.10+). Без torch и моделей: GPU-часть в тестах — моки.
+# Версии зафиксированы, чтобы CI был воспроизводимым; обновлять осознанно, прогоняя `make test`.
+anthropic==2.7.0
+fastapi==0.162.2
+uvicorn==0.54.0
+pydantic==2.13.5
+requests==2.34.2
+httpx==0.28.1            # нужен starlette TestClient (anthropic использует свой httpx2)
+google-cloud-run==0.16.2 # тест статуса Cloud Run на настоящих protobuf-объектах
+google-cloud-storage==3.17.1  # gcp_client / model_server (gcs) / download_models
+pytest==9.2.0
+ruff==0.17.4
+mypy==2.4.1
+types-requests==2.33.0.20261030

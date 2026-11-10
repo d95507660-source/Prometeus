@@ -95,7 +95,7 @@ def _norm(s: str) -> str:
 
 def _clean_result(data: dict, comments: list[dict]) -> dict:
     corpus = [_norm(c["text"]) for c in comments]
-    questions = []
+    questions: list[dict[str, Any]] = []
     for q in data.get("common_questions", []):
         quote = str(q.get("quote", "")).strip()
         questions.append({"question": str(q.get("question", "")).strip(),

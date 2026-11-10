@@ -15,8 +15,9 @@ import os
 import random
 import re
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")

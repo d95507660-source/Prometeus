@@ -29,11 +29,12 @@ import logging
 import re
 import sys
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from diversity import atomic_write_text
 
@@ -202,7 +203,7 @@ def compute_pnl(month: str, *, conversions: Iterable[Any], sales: Iterable[Any],
 
     known = set(accounts)
     qa.unknown_accounts = (set(cpa) | set(soft_gross)) - known if known else set()
-    rows = []
+    rows: list[dict[str, Any]] = []
     for acc in sorted(known | set(cpa) | set(soft_gross)):
         cpa_gross = q(sum(cpa[acc].values(), ZERO))
         commission = q(cpa_gross * rate)

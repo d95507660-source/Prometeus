@@ -1,0 +1,154 @@
+{
+  "niches": {
+    "wrestling_female": {
+      "marker": ".fight",
+      "keywords": [
+        "wrestling",
+        "mma",
+        "grappl",
+        "fight",
+        "ring",
+        "combat",
+        "submission"
+      ],
+      "hashtags_seed": [
+        "#wrestling",
+        "#mma",
+        "#grappling",
+        "#bjj",
+        "#fightgirl",
+        "#combatsports",
+        "#martialarts",
+        "#sparring",
+        "#takedown",
+        "#fitness"
+      ],
+      "hooks": []
+    },
+    "yoga_female": {
+      "marker": ".zen",
+      "keywords": [
+        "yoga",
+        "stretch",
+        "flexib",
+        "flow",
+        "meditat",
+        "asana",
+        "zen"
+      ],
+      "hashtags_seed": [
+        "#yoga",
+        "#stretching",
+        "#flexibility",
+        "#yogaflow",
+        "#mobility",
+        "#yogagirl",
+        "#meditation",
+        "#asana",
+        "#yogapractice",
+        "#wellness"
+      ],
+      "hooks": []
+    },
+    "fitness_female": {
+      "marker": ".lift",
+      "keywords": [
+        "fitness",
+        "gym",
+        "lift",
+        "workout",
+        "strength",
+        "cardio",
+        "training"
+      ],
+      "hashtags_seed": [
+        "#fitness",
+        "#gym",
+        "#workout",
+        "#fitgirl",
+        "#legday",
+        "#homeworkout",
+        "#strength",
+        "#fitnessmotivation",
+        "#training",
+        "#cardio"
+      ],
+      "hooks": []
+    },
+    "dance_female": {
+      "marker": ".move",
+      "keywords": [
+        "dance",
+        "choreo",
+        "moves",
+        "rhythm",
+        "groove",
+        "twerk",
+        "hiphop"
+      ],
+      "hashtags_seed": [
+        "#dance",
+        "#dancer",
+        "#choreography",
+        "#dancechallenge",
+        "#hiphop",
+        "#dancevideo",
+        "#moves",
+        "#groove",
+        "#dancing",
+        "#tutorial"
+      ],
+      "hooks": []
+    },
+    "beach_female": {
+      "marker": ".wave",
+      "keywords": [
+        "beach",
+        "surf",
+        "ocean",
+        "sand",
+        "wave",
+        "swim",
+        "coast"
+      ],
+      "hashtags_seed": [
+        "#beach",
+        "#surf",
+        "#ocean",
+        "#summer",
+        "#beachlife",
+        "#waves",
+        "#sunset",
+        "#travel",
+        "#swim",
+        "#coast"
+      ],
+      "hooks": []
+    },
+    "home_female": {
+      "marker": ".cozy",
+      "keywords": [
+        "home",
+        "cozy",
+        "morning",
+        "coffee",
+        "pajama",
+        "bedroom",
+        "relax"
+      ],
+      "hashtags_seed": [
+        "#cozy",
+        "#morningroutine",
+        "#homedecor",
+        "#slowliving",
+        "#coffee",
+        "#selfcare",
+        "#homelife",
+        "#aesthetic",
+        "#routine",
+        "#hygge"
+      ],
+      "hooks": []
+    }
+  }
+}

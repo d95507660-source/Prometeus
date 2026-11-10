@@ -16,11 +16,12 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from config_loader import AppConfig, apply_env_overrides, load_config, load_dotenv_if_present
 from devices_registry import DevicesRegistry
@@ -117,8 +118,8 @@ def stage_mimic(ctx: Ctx):
 
 def stage_forge(ctx: Ctx):
     """forge через очередь SQLite: повторы, приоритет новых аккаунтов, --resume."""
-    from forge_stage import (EXIT_BUDGET_PAUSED, EXIT_FAILURE_RATIO,
-                             EXIT_INTERRUPTED as FS_INTERRUPTED, stage_forge)
+    from forge_stage import EXIT_BUDGET_PAUSED, EXIT_FAILURE_RATIO, stage_forge
+    from forge_stage import EXIT_INTERRUPTED as FS_INTERRUPTED
     from job_queue import JobQueue
 
     code = stage_forge(ctx.cfg, ctx.registry, resume=ctx.resume,
@@ -213,7 +214,7 @@ def single_instance(lock_path: Path):
         except ImportError:
             pass  # Windows: без блокировки
         except BlockingIOError:
-            raise SystemExit("оркестратор уже запущен (lock: %s)" % lock_path)
+            raise SystemExit(f"оркестратор уже запущен (lock: {lock_path})") from None
         yield
     finally:
         f.close()

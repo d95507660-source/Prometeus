@@ -28,7 +28,7 @@ class DevicesRegistry:
         self.markers: dict = reg.get("niche_markers", {})
 
     @classmethod
-    def from_config(cls, cfg: Any) -> "DevicesRegistry":
+    def from_config(cls, cfg: Any) -> DevicesRegistry:
         """Создать реестр из AppConfig (пути берутся от корня проекта)."""
         return cls(cfg.raw, cfg.path("devices"), cfg.path("niches"))
 
@@ -59,6 +59,8 @@ class DevicesRegistry:
             ipaddress.ip_address(host)
         except ValueError:
             pass  # допускаем имя хоста
+        if port is None:
+            return "adb.port не задан"
         try:
             port_i = int(port)
         except (TypeError, ValueError):
@@ -103,7 +105,7 @@ class DevicesRegistry:
                 if not acc.get("username"):
                     problems.append(f"{platform}: пустой username")
                     continue
-                up = self.username_problem(acc["username"], niche)
+                up = self.username_problem(acc["username"], str(niche or ""))
                 if up:
                     problems.append(f"{platform}: {up}")
             if enabled_accounts == 0:

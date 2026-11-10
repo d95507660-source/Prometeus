@@ -1,23 +1,27 @@
 """gcp_client.py — клиент GCP: Cloud Storage + запуск Cloud Run Job и ожидание выполнения."""
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import time
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger(__name__)
 
+# Необязательные GCP-библиотеки грузим через importlib: локально (без GCP) модуль импортируется,
+# а mypy видит их одинаково (Any) независимо от того, какие из пакетов google-cloud-* установлены.
+storage: Any = None
+run_v2: Any = None
+_IMPORT_ERROR: Exception | None = None
 try:
-    from google.cloud import storage
-    from google.cloud import run_v2
+    storage = importlib.import_module("google.cloud.storage")
+    run_v2 = importlib.import_module("google.cloud.run_v2")
 except ImportError as e:  # локальный запуск без GCP-зависимостей
-    storage = None
-    run_v2 = None
-    _IMPORT_ERROR: Exception | None = e
-else:
-    _IMPORT_ERROR = None
+    storage = run_v2 = None
+    _IMPORT_ERROR = e
 
 
 def parse_gs_uri(uri: str) -> tuple[str, str]:
@@ -131,7 +135,8 @@ class GcpClient:
         # запасной путь: ждём завершения операции, она завершается вместе с выполнением
         try:
             ex = op.result(timeout=timeout_sec + 300)
-            return self._execution_status(ex)
+            # операция завершена, но статус может не определиться — не возвращаем None вызывающему
+            return self._execution_status(ex) or {"status": "UNKNOWN", "execution": ex.name}
         except Exception as e:
             log.error("job failed: %s", e)
             return {"status": "FAILED", "error": str(e)}

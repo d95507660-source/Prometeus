@@ -369,6 +369,8 @@ def post_device(device: dict, cfg_app, day: str | None = None, dry_run: bool = F
                 posted_today[platform] = posted_today.get(platform, 0) + 1
                 continue
             remote = f"ags_{device_id}_{day}_{src_idx}_{platform}.mp4"
+            if serial is None:  # не dry-run — подключение выполнено выше
+                raise PostError("нет подключения к устройству")
             ok = post_video(serial, platform, video, caption, remote, flows, screenshots)
             log.info("публикация %s/%s/%s → %s: %s", device_id, day, source_dir.name, platform,
                      "OK" if ok else "ОШИБКА")

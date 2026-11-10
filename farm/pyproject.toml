@@ -1,0 +1,42 @@
+[project]
+name = "prometheus-farm"
+version = "0.9.0"
+description = "Конвейер коротких видео: генерация (Wan 2.2 + XTTS), планирование, публикация, учёт"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["node_modules"]
+
+[tool.ruff.lint]
+# E/W — стиль, F — ошибки (неиспользуемое, неопределённые имена), B — частые баги,
+# UP — синтаксис под 3.10+, I — порядок импортов
+select = ["E", "W", "F", "B", "UP", "I"]
+ignore = [
+    "E501",   # длину строк держим line-length, длинные строки-сообщения на русском не рвём
+    "B008",   # FastAPI Header()/Depends() в аргументах по умолчанию — штатный приём
+    "B905",   # zip() без strict — осознанно в нескольких местах
+]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "account_health", "audience_analyzer", "autoposter", "budget_guard", "claude_analyst",
+    "claude_builder", "claude_common", "config_loader", "cpa_matcher", "devices_registry",
+    "diversity", "forge", "forge_stage", "gcp_client", "ghost", "job_queue", "link_rotator",
+    "local_worker", "mimic", "model_server", "orchestrator", "revenue_tracker",
+    "run_generation_local",
+]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = false
+files = ["*.py"]
+exclude = ["^tests/"]
