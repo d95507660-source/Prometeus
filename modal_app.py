@@ -87,6 +87,19 @@ TARGET_SHORT_SIDE = 1080
 TARGET_VERTICAL_SIZE = (1080, 1920)                # (width, height) для роликов с соотношением ~9:16
 ASPECT_SNAP_TOLERANCE = 0.03                       # 704x1280 (0.55) приводится к 1080x1920 (0.5625) кропом ~2%
 
+# torch.compile (inductor). Отключение: env SEEDVR2_COMPILE=0.
+SEEDVR2_COMPILE = os.getenv("SEEDVR2_COMPILE", "1") == "1"
+SEEDVR2_COMPILE_MODE = os.getenv("SEEDVR2_COMPILE_MODE", "max-autotune")
+COMPILE_CACHE_DIR = MODELS_DIR / "compile_cache"   # на Volume: кэш переживает перезапуск контейнера
+INDUCTOR_CACHE_DIR = COMPILE_CACHE_DIR / "inductor"
+TRITON_CACHE_DIR = COMPILE_CACHE_DIR / "triton"
+
+# Автокалибровка batch_size по пиковой VRAM (L4 = 24 ГБ). Отключение: env SEEDVR2_CALIBRATE=0.
+CALIBRATION_ENABLED = os.getenv("SEEDVR2_CALIBRATE", "1") == "1"
+CALIBRATION_FRAMES = 5
+CALIBRATION_HIGH_GB = 22.0       # выше — стартуем с batch_size 17
+CALIBRATION_CRITICAL_GB = 23.3   # выше (почти весь объём L4) — стартуем с 13
+
 # Таймауты (секунды)
 GENERATE_TIMEOUT_S = 3 * 60 * 60
 UPSCALE_ATTEMPT_TIMEOUT_S = 90 * 60
@@ -132,7 +145,8 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     # ffmpeg — сборка/мукс видео и копирование аудио; git — клонирование SeedVR2;
     # libgl1/libglib2.0-0 — системные зависимости OpenCV (используется SeedVR2 для чтения кадров).
-    .apt_install("ffmpeg", "git", "libgl1", "libglib2.0-0")
+    # build-essential — C-компилятор для Triton/inductor (torch.compile собирает вспомогательные модули).
+    .apt_install("ffmpeg", "git", "libgl1", "libglib2.0-0", "build-essential")
     .pip_install(
         "torch==2.7.1",
         "torchvision==0.22.1",
@@ -359,6 +373,17 @@ class SeedVR2OOMError(RuntimeError):
     """Запуск SeedVR2 упал из-за нехватки памяти (VRAM или RAM)."""
 
 
+class SeedVR2CompileError(RuntimeError):
+    """Запуск SeedVR2 упал на этапе torch.compile (inductor/Triton), а не в самой модели."""
+
+
+# Признаки сбоя компиляции в логе CLI.
+COMPILE_ERROR_PATTERNS = re.compile(
+    r"(torch\._dynamo|torch\._inductor|InductorError|BackendCompilerFailed|TritonError|"
+    r"triton\.compiler|CompilationError|LoweringException|Failed to find C compiler)",
+)
+
+
 # ---------------------------------------------------------------------------
 # Основной класс
 # ---------------------------------------------------------------------------
@@ -392,6 +417,11 @@ class PrometheusGenerator:
             raise ValueError(f"SEEDVR2_MODEL должен быть одним из {sorted(SEEDVR2_VARIANTS)}, "
                              f"получено {self.seedvr2_model!r}")
         self.seedvr2 = SEEDVR2_VARIANTS[self.seedvr2_model]
+        self._compile_enabled = SEEDVR2_COMPILE
+        # (dit, ширина, высота, батч) -> откалиброванный batch_size; живёт, пока жив контейнер.
+        self._calibration_cache: dict[tuple[str, int, int, int], int] = {}
+        INDUCTOR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        TRITON_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
         HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         downloaded = self._ensure_seedvr2_weights()
@@ -540,12 +570,15 @@ class PrometheusGenerator:
         Шаги:
           1. ffprobe исходника: размер, fps, число кадров, кодек, наличие аудио.
           2. Выбор batch_size (4n+1, >= 5) по длине видео и лимиту VRAM.
-          3. Запуск SeedVR2 (inference_cli.py) в дочернем процессе, по лестнице fallback'ов при OOM.
+          3. Автокалибровка (один раз на контейнер и размер кадра): короткий прогон на 5 кадрах
+             с полным батчем, замер пика VRAM. Если батч не помещается с запасом — стартуем сразу
+             с меньшего, не тратя минуты на заведомо падающую попытку.
+          4. Запуск SeedVR2 (inference_cli.py) в дочернем процессе, по лестнице fallback'ов при OOM.
              Отдельный процесс гарантирует, что после OOM вся VRAM вернётся драйверу — в том же
              процессе фрагментированный аллокатор часто падает и на следующей попытке.
-          4. Финальная сборка ffmpeg: точный размер 1080x1920, кодек как у исходника,
+          5. Финальная сборка ffmpeg: точный размер 1080x1920, кодек как у исходника,
              аудиодорожка копируется из исходного файла без перекодирования.
-          5. Проверка результата и атомарная запись в output_path.
+          6. Проверка результата и атомарная запись в output_path.
 
         Возвращает output_path. При ошибке — RuntimeError/ValueError/FileNotFoundError с описанием.
         """
@@ -570,12 +603,14 @@ class PrometheusGenerator:
         self._release_wan_vram()
 
         initial_batch = choose_batch_size(src.frame_count, self.seedvr2.max_batch_size)
-        plan = build_attempt_plan(initial_batch, self.seedvr2)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         with tempfile.TemporaryDirectory(prefix="seedvr2_") as tmp:
             work_dir = Path(tmp)
             upscaled_raw = work_dir / "upscaled_noaudio.mp4"
+
+            initial_batch = self._calibrate_batch_size(input_path, src, initial_batch, work_dir)
+            plan = build_attempt_plan(initial_batch, self.seedvr2)
 
             last_error: Exception | None = None
             used: UpscaleAttempt | None = None
@@ -624,23 +659,133 @@ class PrometheusGenerator:
             finally:
                 tmp_out.unlink(missing_ok=True)
 
+        self._persist_compile_cache()
         log.info("upscale_video: сохранено %s (%dx%d)", output_path, target_w, target_h)
         return output_path
 
+    def _calibrate_batch_size(self, input_path: Path, src: VideoInfo, initial_batch: int,
+                              work_dir: Path) -> int:
+        """Микро-тест VRAM перед первым роликом данного размера в этом контейнере.
+
+        Прогон SeedVR2 на первых CALIBRATION_FRAMES кадрах (--load_cap) с тем же batch_size и теми же
+        флагами, что и у реального запуска. Благодаря --uniform_batch_size 5 кадров дополняются до
+        полного батча, поэтому DiT и тайлы VAE получают ровно те же формы тензоров, что и в боевом
+        прогоне, — пик памяти репрезентативен, а скомпилированные графы (torch.compile) сразу
+        попадают в кэш и переиспользуются основным прогоном.
+
+        Пик меряется по всей видеокарте (torch.cuda.mem_get_info), а не через
+        torch.cuda.max_memory_allocated(): SeedVR2 работает в дочернем процессе, и счётчики
+        аллокатора родителя его память не видят. Метрика «занято на устройстве» включает резерв
+        аллокатора и CUDA-контекст — именно с ней сравнивается лимит 24 ГБ при OOM.
+
+        Пороги (L4, 24 ГБ):
+          - OOM на калибровке или пик > CALIBRATION_CRITICAL_GB -> 13;
+          - пик > CALIBRATION_HIGH_GB (22 ГБ)                   -> 17;
+          - иначе (в т.ч. < 18 ГБ)                              -> исходный батч (21).
+        Результат кэшируется на контейнер; ошибки, не связанные с памятью, калибровку пропускают
+        (лестница fallback'ов всё равно подстрахует).
+        """
+        if not CALIBRATION_ENABLED or initial_batch < 13 or self.seedvr2.initial_blocks_to_swap > 0:
+            # Батч и так маленький (короткий ролик) или вариант 7B стартует с BlockSwap —
+            # калибровка не сэкономит времени.
+            return initial_batch
+        if src.frame_count < CALIBRATION_FRAMES:
+            return initial_batch
+
+        key = (self.seedvr2.dit_file, src.width, src.height, initial_batch)
+        cached = self._calibration_cache.get(key)
+        if cached is not None:
+            log.info("калибровка: batch_size=%d (из кэша контейнера)", cached)
+            return cached
+
+        attempt = UpscaleAttempt(initial_batch, 0, False)
+        probe_out = work_dir / "calibration.mp4"
+        started = time.monotonic()
+        try:
+            peak_bytes = self._run_seedvr2(input_path, probe_out, attempt, src, work_dir,
+                                           load_cap=CALIBRATION_FRAMES, monitor_vram=True)
+        except SeedVR2OOMError:
+            chosen = 13
+            log.warning("калибровка: OOM при batch_size=%d на %d кадрах -> стартую с batch_size=%d",
+                        initial_batch, CALIBRATION_FRAMES, chosen)
+            self._calibration_cache[key] = chosen
+            return chosen
+        except RuntimeError as exc:
+            log.warning("калибровка пропущена (ошибка не по памяти): %s", str(exc).splitlines()[0])
+            return initial_batch
+        finally:
+            probe_out.unlink(missing_ok=True)
+
+        if peak_bytes is None:
+            log.warning("калибровка: не удалось измерить VRAM, оставляю batch_size=%d", initial_batch)
+            return initial_batch
+
+        peak_gb = peak_bytes / 2**30
+        if peak_gb > CALIBRATION_CRITICAL_GB:
+            chosen = min(initial_batch, 13)
+        elif peak_gb > CALIBRATION_HIGH_GB:
+            chosen = min(initial_batch, 17)
+        else:
+            chosen = initial_batch
+        log.info("калибровка: пик VRAM %.1f ГБ при batch_size=%d за %.0f c -> batch_size=%d",
+                 peak_gb, initial_batch, time.monotonic() - started, chosen)
+        self._calibration_cache[key] = chosen
+        return chosen
+
+    def _compile_args(self, attempt: UpscaleAttempt) -> list[str]:
+        """Флаги torch.compile для CLI.
+
+        backend inductor + mode max-autotune — рекомендация документации SeedVR2 для продакшена
+        (DiT +20–40%, VAE +15–25%). На попытках с BlockSwap используется max-autotune-no-cudagraphs:
+        CUDA graphs записывают фиксированные адреса весов в VRAM, а BlockSwap на каждом шаге
+        перекладывает блоки между CPU и GPU — графы постоянно инвалидируются, а их пул памяти
+        съедает VRAM, ради которой BlockSwap и включён. Ядра Triton при этом те же — на качество
+        режим не влияет.
+        """
+        if not self._compile_enabled:
+            return []
+        mode = SEEDVR2_COMPILE_MODE
+        if attempt.blocks_to_swap > 0 and mode == "max-autotune":
+            mode = "max-autotune-no-cudagraphs"
+        return [
+            "--compile_dit", "--compile_vae",
+            "--compile_backend", "inductor",
+            "--compile_mode", mode,
+        ]
+
+    def _persist_compile_cache(self) -> None:
+        """Сохраняет кэш inductor/Triton в Volume, чтобы следующие контейнеры не компилировали заново."""
+        if not self._compile_enabled:
+            return
+        try:
+            models_volume.commit()
+        except Exception as exc:  # кэш — оптимизация, его потеря не должна ронять апскейл
+            log.warning("не удалось сохранить кэш компиляции в Volume: %s", exc)
+
     def _run_seedvr2(self, input_path: Path, output_path: Path, attempt: UpscaleAttempt,
-                     src: VideoInfo, work_dir: Path) -> None:
-        """Один запуск inference_cli.py. Поднимает SeedVR2OOMError при нехватке памяти и RuntimeError
-        при любой другой ошибке (её fallback не лечит — нет смысла жечь GPU-время на повторы)."""
+                     src: VideoInfo, work_dir: Path, *, load_cap: int = 0,
+                     monitor_vram: bool = False) -> int | None:
+        """Один запуск inference_cli.py.
+
+        Поднимает SeedVR2OOMError при нехватке памяти и RuntimeError при любой другой ошибке
+        (её fallback по памяти не лечит). Исключение — сбой torch.compile: тогда та же попытка
+        повторяется один раз без компиляции, а компиляция отключается до конца жизни контейнера —
+        ускорение не должно стоить упавшего ролика.
+
+        load_cap > 0 — обработать только первые N кадров (калибровка).
+        monitor_vram — замерить пик занятой VRAM на устройстве (байты) и вернуть его.
+        """
         batch = attempt.batch_size
         temporal = attempt.temporal
+        frames = min(src.frame_count, load_cap) if load_cap > 0 else src.frame_count
 
         # Потоковый режим (--chunk_size): кадры читаются и обрабатываются порциями, иначе 45 с
         # видео в 1080p (~1350 кадров) целиком в RAM занимают десятки ГБ.
         # Чанк кратен батчу, чтобы границы батчей и чанков совпадали.
         chunk_size = max(batch * 8, 64) if batch > 1 else 96
-        chunk_size = min(chunk_size, max(src.frame_count, batch))
+        chunk_size = min(chunk_size, max(frames, batch))
 
-        cmd: list[str] = [
+        base_cmd: list[str] = [
             sys.executable, str(SEEDVR2_CLI), str(input_path),
             "--output", str(output_path),
             "--output_format", "mp4",
@@ -667,8 +812,11 @@ class PrometheusGenerator:
             "--vae_offload_device", "cpu",
             "--attention_mode", "sdpa",
         ]
+        if load_cap > 0:
+            # Калибровка: читаем только первые N кадров, полноценное видео не обрабатывается.
+            base_cmd += ["--load_cap", str(load_cap)]
         if temporal:
-            cmd += [
+            base_cmd += [
                 # Последний батч дополняется до полного размера: короткий «хвостовой» батч
                 # даёт видимый скачок качества/мерцание в конце ролика.
                 "--uniform_batch_size",
@@ -681,19 +829,50 @@ class PrometheusGenerator:
         if attempt.blocks_to_swap > 0:
             # BlockSwap: часть трансформер-блоков DiT живёт в RAM и подгружается на GPU по мере
             # прохода. Медленнее, но освобождает VRAM под активации большого батча.
-            cmd += ["--blocks_to_swap", str(attempt.blocks_to_swap)]
+            # Флага --use_non_blocking в CLI нет (на закреплённом коммите BlockSwap всегда
+            # копирует с non_blocking=False) — передавать его нельзя, argparse завершит процесс.
+            base_cmd += ["--blocks_to_swap", str(attempt.blocks_to_swap)]
             if attempt.swap_io_components:
-                cmd.append("--swap_io_components")
+                base_cmd.append("--swap_io_components")
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONPATH"] = f"{SEEDVR2_CODE_DIR}:{env.get('PYTHONPATH', '')}"
         # Уменьшает фрагментацию VRAM на длинных прогонах с переменными размерами тензоров.
         env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+        # Персистентный кэш torch.compile на Volume. Каждая попытка — новый процесс, поэтому без
+        # дискового кэша компиляция (минуты для max-autotune) повторялась бы на каждом ролике.
+        # FX-граф, результаты автотюнинга и ядра Triton переживают и процесс, и контейнер.
+        env["TORCHINDUCTOR_CACHE_DIR"] = str(INDUCTOR_CACHE_DIR)
+        env["TRITON_CACHE_DIR"] = str(TRITON_CACHE_DIR)
+        env["TORCHINDUCTOR_FX_GRAPH_CACHE"] = "1"
+        env["TORCHINDUCTOR_AUTOGRAD_CACHE"] = "1"
 
+        while True:
+            compile_args = self._compile_args(attempt)
+            cmd = base_cmd + compile_args
+            label = attempt.describe() + (", compile" if compile_args else "") + \
+                (f", calibration {load_cap} кадров" if load_cap else "")
+            try:
+                return self._exec_seedvr2(cmd, env, output_path, label, frames, monitor_vram)
+            except SeedVR2CompileError as exc:
+                if not compile_args:
+                    raise RuntimeError(str(exc)) from exc
+                log.warning("torch.compile не сработал — отключаю компиляцию в этом контейнере и "
+                            "повторяю попытку без неё: %s", str(exc).splitlines()[0])
+                self._compile_enabled = False
+                output_path.unlink(missing_ok=True)
+
+    def _exec_seedvr2(self, cmd: list[str], env: dict[str, str], output_path: Path, label: str,
+                      frames: int, monitor_vram: bool) -> int | None:
+        """Запускает процесс SeedVR2, стримит лог, классифицирует ошибку. Возвращает пик VRAM
+        (байты, занято на устройстве) при monitor_vram=True."""
         tail: deque[str] = deque(maxlen=200)
         oom_seen = False
+        compile_error_seen = False
         timed_out = threading.Event()
+        stop_monitor = threading.Event()
+        peak_used = [0]
         started = time.monotonic()
         proc = subprocess.Popen(
             cmd, cwd=str(SEEDVR2_CODE_DIR), env=env,
@@ -704,6 +883,23 @@ class PrometheusGenerator:
             # Сторожевой таймер: срабатывает, даже если процесс завис и ничего не пишет в лог.
             timed_out.set()
             proc.kill()
+
+        def _monitor() -> None:
+            # cudaMemGetInfo из родителя видит память всех процессов на GPU. Опрос каждые 20 мс;
+            # короткие всплески между опросами компенсирует запас в порогах калибровки.
+            import torch
+            while not stop_monitor.is_set():
+                try:
+                    free, total = torch.cuda.mem_get_info()
+                    peak_used[0] = max(peak_used[0], total - free)
+                except Exception:
+                    return
+                stop_monitor.wait(0.02)
+
+        monitor_thread: threading.Thread | None = None
+        if monitor_vram and self._cuda_available():
+            monitor_thread = threading.Thread(target=_monitor, daemon=True)
+            monitor_thread.start()
 
         watchdog = threading.Timer(UPSCALE_ATTEMPT_TIMEOUT_S, _on_timeout)
         watchdog.daemon = True
@@ -717,10 +913,15 @@ class PrometheusGenerator:
                 tail.append(line)
                 if OOM_PATTERNS.search(line):
                     oom_seen = True
+                if COMPILE_ERROR_PATTERNS.search(line):
+                    compile_error_seen = True
                 log.info("[seedvr2] %s", line)
             returncode = proc.wait()
         finally:
             watchdog.cancel()
+            stop_monitor.set()
+            if monitor_thread is not None:
+                monitor_thread.join(timeout=1)
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
@@ -729,18 +930,29 @@ class PrometheusGenerator:
         tail_text = "\n".join(list(tail)[-40:])
         if timed_out.is_set():
             raise RuntimeError(f"SeedVR2: превышен таймаут попытки {UPSCALE_ATTEMPT_TIMEOUT_S} c "
-                               f"({attempt.describe()}):\n{tail_text}")
+                               f"({label}):\n{tail_text}")
         if returncode == -9 or (returncode != 0 and oom_seen):
-            raise SeedVR2OOMError(
-                f"нехватка памяти (код {returncode}, {elapsed:.0f} c, {attempt.describe()}):\n{tail_text}"
-            )
+            raise SeedVR2OOMError(f"нехватка памяти (код {returncode}, {elapsed:.0f} c, {label}):\n{tail_text}")
+        if returncode != 0 and compile_error_seen:
+            raise SeedVR2CompileError(f"ошибка torch.compile (код {returncode}, {label}):\n{tail_text}")
         if returncode != 0:
-            raise RuntimeError(f"SeedVR2 завершился с кодом {returncode} ({attempt.describe()}):\n{tail_text}")
+            raise RuntimeError(f"SeedVR2 завершился с кодом {returncode} ({label}):\n{tail_text}")
         if oom_seen and not output_path.is_file():
-            raise SeedVR2OOMError(f"нехватка памяти ({attempt.describe()}):\n{tail_text}")
+            raise SeedVR2OOMError(f"нехватка памяти ({label}):\n{tail_text}")
         if not output_path.is_file() or output_path.stat().st_size == 0:
             raise RuntimeError(f"SeedVR2 завершился успешно, но не создал {output_path}:\n{tail_text}")
-        log.info("SeedVR2: прогон занял %.0f c (%.2f кадр/с)", elapsed, src.frame_count / max(elapsed, 1e-6))
+        log.info("SeedVR2: прогон занял %.0f c (%.2f кадр/с, %s)", elapsed, frames / max(elapsed, 1e-6), label)
+        if monitor_vram:
+            return peak_used[0] or None
+        return None
+
+    @staticmethod
+    def _cuda_available() -> bool:
+        try:
+            import torch
+            return bool(torch.cuda.is_available())
+        except Exception:
+            return False
 
     def _mux_final(self, upscaled: Path, original: Path, output: Path, src: VideoInfo,
                    target_w: int, target_h: int) -> None:
