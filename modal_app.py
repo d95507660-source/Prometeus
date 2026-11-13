@@ -396,6 +396,11 @@ COMPILE_ERROR_PATTERNS = re.compile(
     volumes={str(MODELS_DIR): models_volume, str(OUTPUTS_DIR): outputs_volume},
     timeout=GENERATE_TIMEOUT_S,
     scaledown_window=300,
+    # GPU memory snapshot (enable_memory_snapshot + experimental_options={"enable_gpu_snapshot": True})
+    # намеренно НЕ включён: SeedVR2 работает в дочерних процессах, которые снапшот не захватывает
+    # (его холодный старт не сокращается); Wan держится в RAM через enable_model_cpu_offload (accelerate-хуки),
+    # так что в VRAM на момент снапшота почти ничего нет; а setup() пишет в Volume (докачка весов + commit),
+    # что в фазе снапшота небезопасно.
 )
 class PrometheusGenerator:
     seedvr2_model: str = modal.parameter(default=os.getenv("SEEDVR2_MODEL", "3b"))
